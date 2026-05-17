@@ -54,7 +54,11 @@ def make_sample(task: str, plan: str, history: list[dict[str, Any]], payload: di
             "arguments": payload.get("arguments", {}),
             "reason": payload.get("reason", ""),
         },
-        "metadata": {"trace": str(trace), "step": payload.get("step")},
+        "metadata": {
+            "trace": str(trace),
+            "step": payload.get("step"),
+            "format_violation": bool(payload.get("format_violation")),
+        },
     }
 
 
@@ -65,6 +69,7 @@ def history_item(payload: dict[str, Any]) -> dict[str, Any]:
         "arguments": payload.get("arguments", {}),
         "ok": result.get("ok"),
         "error_type": result.get("error_type", ""),
+        "format_violation": bool(payload.get("format_violation")),
     }
 
 

@@ -16,6 +16,7 @@ class RunStats:
     pass_rate: float
     avg_steps: float
     avg_elapsed_ms: float
+    format_violation_rate: float
     backends: dict[str, int]
 
     def render(self) -> str:
@@ -26,6 +27,7 @@ class RunStats:
                 "pass_rate": round(self.pass_rate, 4),
                 "avg_steps": round(self.avg_steps, 2),
                 "avg_elapsed_ms": round(self.avg_elapsed_ms, 2),
+                "format_violation_rate": round(self.format_violation_rate, 4),
                 "backends": self.backends,
             },
             ensure_ascii=False,
@@ -39,6 +41,8 @@ def compute_run_stats(runs_path: Path) -> RunStats:
     backends: dict[str, int] = {}
     step_counts: list[int] = []
     elapsed_values: list[float] = []
+    tool_calls = 0
+    format_violations = 0
 
     for trace in traces:
         if not trace.exists():
@@ -53,6 +57,9 @@ def compute_run_stats(runs_path: Path) -> RunStats:
                 run_started = payload
             elif name == "tool_call":
                 steps += 1
+                tool_calls += 1
+                if payload.get("format_violation"):
+                    format_violations += 1
             elif name == "run_finished":
                 run_finished = payload
 
@@ -73,5 +80,6 @@ def compute_run_stats(runs_path: Path) -> RunStats:
         pass_rate=success / total if total else 0.0,
         avg_steps=mean(step_counts) if step_counts else 0.0,
         avg_elapsed_ms=mean(elapsed_values) if elapsed_values else 0.0,
+        format_violation_rate=format_violations / tool_calls if tool_calls else 0.0,
         backends=backends,
     )

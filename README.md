@@ -44,6 +44,7 @@ This is an independent MVP implementation for learning and extension. It is insp
 - Includes a deterministic `--mock` model for local demos without an API key.
 - Writes JSONL traces for every run.
 - Records raw model output, retry count, step latency, final diff, and run latency.
+- Marks `format_violation=true` when a model response had recoverable markdown/prose around JSON.
 - Classifies outcomes such as `success`, `invalid_json`, `edit_miss`, `test_failed`, `blocked_by_policy`, and `max_steps`.
 - Supports `local` and `docker` test execution backends.
 - Runs JSONL task manifests for batch trajectory collection.
@@ -145,14 +146,14 @@ Each run creates `runs/<run_id>/trace.jsonl` with events such as:
 ```json
 {"event": "run_started", "payload": {"task": "..."}}
 {"event": "plan", "payload": {"plan": "..."}}
-{"event": "tool_call", "payload": {"tool": "read_file", "arguments": {"path": "calculator.py"}, "raw_output": "{...}", "retries_used": 0, "elapsed_ms": 1.2, "result": {"ok": true}}}
+{"event": "tool_call", "payload": {"tool": "read_file", "arguments": {"path": "calculator.py"}, "raw_output": "{...}", "retries_used": 0, "format_violation": false, "elapsed_ms": 1.2, "result": {"ok": true}}}
 {"event": "run_finished", "payload": {"outcome": "success", "diff": "...", "elapsed_ms": 45.1}}
 ```
 
 When Docker mode is enabled, `run_started` also records the backend and image:
 
 ```json
-{"event": "run_started", "payload": {"sandbox_backend": "docker", "docker_image": "python:3.11-slim"}}
+{"event": "run_started", "payload": {"provider": "openai", "model": "deepseek-chat", "sandbox_backend": "docker", "docker_image": "python:3.11-slim"}}
 ```
 
 Current outcome taxonomy:

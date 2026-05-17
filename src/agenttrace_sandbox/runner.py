@@ -13,12 +13,17 @@ from agenttrace_sandbox.tools import ToolRegistry, ToolResult
 from agenttrace_sandbox.tracing import write_event
 
 
-PLANNER_SYSTEM = "You are a careful coding-agent planner. Prefer small, testable edits."
+PLANNER_SYSTEM = """You are a careful coding-agent planner.
+Use only the available file/test tools. Prefer the smallest code change that satisfies the task.
+Do not propose commits, pull requests, package installs, or extra test rewrites unless the user explicitly asks.
+"""
 ACTOR_SYSTEM = """You are a coding agent that must output exactly one JSON object.
+Output raw JSON only: no markdown, no code fences, no prose before or after the JSON.
 Choose one tool call at a time. Inspect files before editing. Run tests after editing.
+Prefer minimal code edits. Do not modify tests unless the task asks for tests or the existing tests are clearly wrong.
 Schema: {"tool": "tool_name", "arguments": {}, "reason": "brief reason"}"""
 REPAIR_SYSTEM = """You repair invalid tool-call responses.
-Return exactly one JSON object matching:
+Return raw JSON only, with no markdown or prose, matching:
 {"tool": "tool_name", "arguments": {}, "reason": "brief reason"}"""
 
 
@@ -38,6 +43,7 @@ class StepDecision:
     action: dict[str, Any]
     parse_error: str
     retries_used: int
+    format_violation: bool
 
 
 def run_task(repo: Path, task: str, test_command: str, config: AgentConfig, model: ChatModel) -> RunResult:
@@ -61,6 +67,9 @@ def run_task(repo: Path, task: str, test_command: str, config: AgentConfig, mode
             "source_repo": str(sandbox.source_repo),
             "workspace": str(sandbox.workspace),
             "task": task,
+            "provider": config.provider,
+            "model": config.model,
+            "temperature": config.temperature,
             "sandbox_backend": sandbox.backend,
             "docker_image": sandbox.docker_image if sandbox.backend == "docker" else "",
         },
@@ -127,7 +136,13 @@ def next_action(
     raw = model.complete(ACTOR_SYSTEM, prompt)
     for retry in range(max_retries + 1):
         try:
-            return StepDecision(raw=raw, action=normalize_action(extract_json_object(raw)), parse_error="", retries_used=retry)
+            return StepDecision(
+                raw=raw,
+                action=normalize_action(extract_json_object(raw)),
+                parse_error="",
+                retries_used=retry,
+                format_violation=not is_raw_json_object(raw),
+            )
         except Exception as exc:  # noqa: BLE001
             if retry >= max_retries:
                 action = {
@@ -135,7 +150,7 @@ def next_action(
                     "arguments": {"summary": f"Invalid model JSON after {max_retries + 1} attempt(s): {exc}"},
                     "reason": "invalid_json",
                 }
-                return StepDecision(raw=raw, action=action, parse_error=str(exc), retries_used=retry)
+                return StepDecision(raw=raw, action=action, parse_error=str(exc), retries_used=retry, format_violation=True)
             raw = model.complete(
                 REPAIR_SYSTEM,
                 f"Original response was not valid JSON for the tool schema.\nError: {exc}\nResponse:\n{raw}",
@@ -145,6 +160,7 @@ def next_action(
         action={"tool": "finish", "arguments": {"summary": "unreachable"}, "reason": "invalid_json"},
         parse_error="unreachable",
         retries_used=max_retries,
+        format_violation=True,
     )
 
 
@@ -167,6 +183,7 @@ def execute_step(decision: StepDecision, tools: ToolRegistry, test_command: str)
         "raw_output": decision.raw,
         "parse_error": decision.parse_error,
         "retries_used": decision.retries_used,
+        "format_violation": decision.format_violation,
         "elapsed_ms": round((time.perf_counter() - started_at) * 1000, 2),
         "result": result_to_dict(result),
     }
@@ -185,6 +202,16 @@ def normalize_action(action: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(reason, str):
         reason = str(reason)
     return {"tool": tool, "arguments": arguments, "reason": reason}
+
+
+def is_raw_json_object(text: str) -> bool:
+    stripped = text.strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return False
+    try:
+        return isinstance(json.loads(stripped), dict)
+    except json.JSONDecodeError:
+        return False
 
 
 def build_actor_prompt(task: str, test_command: str, plan: str, tools: str, history: list[dict[str, Any]]) -> str:
