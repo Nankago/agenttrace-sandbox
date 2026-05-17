@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,9 @@ PLANNER_SYSTEM = "You are a careful coding-agent planner. Prefer small, testable
 ACTOR_SYSTEM = """You are a coding agent that must output exactly one JSON object.
 Choose one tool call at a time. Inspect files before editing. Run tests after editing.
 Schema: {"tool": "tool_name", "arguments": {}, "reason": "brief reason"}"""
+REPAIR_SYSTEM = """You repair invalid tool-call responses.
+Return exactly one JSON object matching:
+{"tool": "tool_name", "arguments": {}, "reason": "brief reason"}"""
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,7 @@ class RunResult:
 
 
 def run_task(repo: Path, task: str, test_command: str, config: AgentConfig, model: ChatModel) -> RunResult:
+    started_at = time.perf_counter()
     sandbox = Sandbox.create(repo, config.runs_dir)
     tools = ToolRegistry(sandbox, timeout=config.command_timeout)
     history: list[dict[str, Any]] = []
@@ -44,38 +49,59 @@ def run_task(repo: Path, task: str, test_command: str, config: AgentConfig, mode
     final_summary = ""
     outcome = "incomplete"
     for step in range(1, config.max_steps + 1):
-        raw = model.complete(
-            ACTOR_SYSTEM,
-            build_actor_prompt(task, test_command, plan, tools.descriptions(), history),
+        step_started_at = time.perf_counter()
+        raw, action, parse_error, retries_used = next_action(
+            model=model,
+            task=task,
+            test_command=test_command,
+            plan=plan,
+            tools=tools.descriptions(),
+            history=history,
+            max_retries=config.json_retries,
         )
-        try:
-            action = extract_json_object(raw)
-            tool = str(action.get("tool", ""))
-            arguments = action.get("arguments", {})
-            if not isinstance(arguments, dict):
-                arguments = {}
-        except Exception as exc:  # noqa: BLE001
-            action = {"tool": "finish", "arguments": {"summary": f"Invalid model JSON: {exc}"}, "reason": "invalid_json"}
-            tool = "finish"
-            arguments = action["arguments"]
+        tool = str(action.get("tool", ""))
+        arguments = action.get("arguments", {})
+        if not isinstance(arguments, dict):
+            arguments = {}
 
         if tool == "run_tests" and not arguments.get("command"):
             arguments["command"] = test_command
         result = tools.run(tool, arguments)
-        record = {"tool": tool, "arguments": arguments, "reason": action.get("reason", ""), "result": result_to_dict(result)}
+        if parse_error:
+            result = ToolResult(False, parse_error, error_type="invalid_json")
+        elapsed_ms = round((time.perf_counter() - step_started_at) * 1000, 2)
+        record = {
+            "tool": tool,
+            "arguments": arguments,
+            "reason": action.get("reason", ""),
+            "raw_output": raw,
+            "parse_error": parse_error,
+            "retries_used": retries_used,
+            "elapsed_ms": elapsed_ms,
+            "result": result_to_dict(result),
+        }
         history.append(record)
         write_event(sandbox.trace_path, "tool_call", {"step": step, **record})
 
+        if parse_error:
+            final_summary = str(arguments.get("summary") or f"Invalid model JSON: {parse_error}")
+            outcome = classify_outcome(history, max_steps_reached=False)
+            break
         if tool == "finish":
             final_summary = str(arguments.get("summary", result.output))
-            outcome = classify_outcome(history)
+            outcome = classify_outcome(history, max_steps_reached=False)
             break
     else:
-        outcome = classify_outcome(history)
+        outcome = classify_outcome(history, max_steps_reached=True)
         final_summary = f"Stopped after max_steps={config.max_steps}."
 
     diff = tools.run("git_diff", {})
-    write_event(sandbox.trace_path, "run_finished", {"outcome": outcome, "summary": final_summary, "diff": diff.output})
+    total_elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
+    write_event(
+        sandbox.trace_path,
+        "run_finished",
+        {"outcome": outcome, "summary": final_summary, "diff": diff.output, "elapsed_ms": total_elapsed_ms},
+    )
     return RunResult(
         run_id=sandbox.run_id,
         workspace=sandbox.workspace,
@@ -84,6 +110,50 @@ def run_task(repo: Path, task: str, test_command: str, config: AgentConfig, mode
         steps=len(history),
         final_summary=final_summary,
     )
+
+
+def next_action(
+    model: ChatModel,
+    task: str,
+    test_command: str,
+    plan: str,
+    tools: str,
+    history: list[dict[str, Any]],
+    max_retries: int,
+) -> tuple[str, dict[str, Any], str, int]:
+    prompt = build_actor_prompt(task, test_command, plan, tools, history)
+    raw = model.complete(ACTOR_SYSTEM, prompt)
+    for retry in range(max_retries + 1):
+        try:
+            return raw, normalize_action(extract_json_object(raw)), "", retry
+        except Exception as exc:  # noqa: BLE001
+            if retry >= max_retries:
+                action = {
+                    "tool": "finish",
+                    "arguments": {"summary": f"Invalid model JSON after {max_retries + 1} attempt(s): {exc}"},
+                    "reason": "invalid_json",
+                }
+                return raw, action, str(exc), retry
+            raw = model.complete(
+                REPAIR_SYSTEM,
+                f"Original response was not valid JSON for the tool schema.\nError: {exc}\nResponse:\n{raw}",
+            )
+    return raw, {"tool": "finish", "arguments": {"summary": "unreachable"}, "reason": "invalid_json"}, "unreachable", max_retries
+
+
+def normalize_action(action: dict[str, Any]) -> dict[str, Any]:
+    tool = action.get("tool")
+    if not isinstance(tool, str) or not tool.strip():
+        raise ValueError("tool must be a non-empty string")
+    arguments = action.get("arguments", {})
+    if arguments is None:
+        arguments = {}
+    if not isinstance(arguments, dict):
+        raise ValueError("arguments must be an object")
+    reason = action.get("reason", "")
+    if not isinstance(reason, str):
+        reason = str(reason)
+    return {"tool": tool, "arguments": arguments, "reason": reason}
 
 
 def build_actor_prompt(task: str, test_command: str, plan: str, tools: str, history: list[dict[str, Any]]) -> str:
@@ -109,16 +179,22 @@ def result_to_dict(result: ToolResult) -> dict[str, Any]:
     return asdict(result)
 
 
-def classify_outcome(history: list[dict[str, Any]]) -> str:
+def classify_outcome(history: list[dict[str, Any]], max_steps_reached: bool = False) -> str:
     if not history:
         return "no_actions"
+    if any(item["result"].get("error_type") == "invalid_json" for item in history):
+        return "invalid_json"
     tests = [item for item in history if item["tool"] == "run_tests"]
     if tests and tests[-1]["result"]["ok"]:
         return "success"
     if any(item["result"].get("blocked") for item in history):
         return "blocked_by_policy"
+    if any(item["result"].get("error_type") == "edit_miss" for item in history):
+        return "edit_miss"
     if any(item["result"].get("error_type") == "test_failed" for item in history):
         return "test_failed"
+    if max_steps_reached:
+        return "max_steps"
     if history[-1]["tool"] == "finish":
         return "finished_without_tests"
     return "incomplete"

@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agenttrace_sandbox.config import AgentConfig
 from agenttrace_sandbox.llm import MockCodingModel, OpenAICompatibleChat
+from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
 from agenttrace_sandbox.sft_export import export_sft
 
@@ -19,9 +20,17 @@ def main() -> None:
     run_parser.add_argument("--test-command", default="python3 -m unittest discover -s tests")
     run_parser.add_argument("--mock", action="store_true", help="Use deterministic local model instead of an API.")
 
+    manifest_parser = sub.add_parser("run-manifest", help="Run a JSONL task manifest and collect traces.")
+    manifest_parser.add_argument("--manifest", required=True, type=Path)
+    manifest_parser.add_argument("--output", default=Path("runs/manifest_results.jsonl"), type=Path)
+    manifest_parser.add_argument("--limit", type=int)
+    manifest_parser.add_argument("--dry-run", action="store_true")
+    manifest_parser.add_argument("--mock", action="store_true", help="Use deterministic local model instead of an API.")
+
     export_parser = sub.add_parser("export-sft", help="Convert traces into SFT JSONL.")
     export_parser.add_argument("--traces", default=Path("runs"), type=Path)
     export_parser.add_argument("--output", default=Path("data/sft/tool_calls.jsonl"), type=Path)
+    export_parser.add_argument("--format", choices=["jsonl", "alpaca"], default="jsonl")
 
     args = parser.parse_args()
     if args.command == "run":
@@ -34,8 +43,17 @@ def main() -> None:
         print(f"workspace={result.workspace}")
         print(f"trace={result.trace_path}")
         print(f"summary={result.final_summary}")
+    elif args.command == "run-manifest":
+        config = AgentConfig.from_env()
+        model = MockCodingModel() if args.mock else OpenAICompatibleChat(config)
+        summary = run_manifest(args.manifest, config, model, args.output, limit=args.limit, dry_run=args.dry_run)
+        print(f"total={summary.total}")
+        print(f"ran={summary.ran}")
+        print(f"skipped={summary.skipped}")
+        print(f"outcomes={summary.outcomes}")
+        print(f"output={summary.output_path}")
     elif args.command == "export-sft":
-        count = export_sft(args.traces, args.output)
+        count = export_sft(args.traces, args.output, output_format=args.format)
         print(f"wrote {count} samples to {args.output}")
 
 

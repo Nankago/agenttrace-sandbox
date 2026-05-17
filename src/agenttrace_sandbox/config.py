@@ -13,6 +13,7 @@ class AgentConfig:
     model: str = "gpt-4o-mini"
     temperature: float = 0.1
     max_steps: int = 8
+    json_retries: int = 2
     command_timeout: int = 30
     runs_dir: Path = Path("runs")
 
@@ -25,6 +26,7 @@ class AgentConfig:
             model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
             temperature=float(os.getenv("AGENTTRACE_TEMPERATURE", "0.1")),
             max_steps=int(os.getenv("AGENTTRACE_MAX_STEPS", "8")),
+            json_retries=int(os.getenv("AGENTTRACE_JSON_RETRIES", "2")),
             command_timeout=int(os.getenv("AGENTTRACE_COMMAND_TIMEOUT", "30")),
             runs_dir=Path(os.getenv("AGENTTRACE_RUNS_DIR", "runs")),
         )

@@ -1,0 +1,1 @@
+{"id": "buggy_calculator_subtract", "repo": "buggy_calculator", "task": "Fix the subtract function bug.", "test_command": "python3 -m unittest discover -s tests"}

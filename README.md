@@ -43,7 +43,10 @@ This is an independent MVP implementation for learning and extension. It is insp
 - Supports OpenAI-compatible chat APIs.
 - Includes a deterministic `--mock` model for local demos without an API key.
 - Writes JSONL traces for every run.
-- Exports successful tool calls into SFT JSONL.
+- Records raw model output, retry count, step latency, final diff, and run latency.
+- Classifies outcomes such as `success`, `invalid_json`, `edit_miss`, `test_failed`, `blocked_by_policy`, and `max_steps`.
+- Runs JSONL task manifests for batch trajectory collection.
+- Exports successful tool calls into JSONL or Alpaca-style SFT data.
 
 ## Quick Start
 
@@ -73,6 +76,24 @@ python -m agenttrace_sandbox.cli export-sft \
   --output data/sft/tool_calls.jsonl
 ```
 
+Export Alpaca-style data for LLaMA-Factory-style workflows:
+
+```bash
+python -m agenttrace_sandbox.cli export-sft \
+  --traces runs \
+  --output data/sft/tool_calls_alpaca.json \
+  --format alpaca
+```
+
+Run a task manifest:
+
+```bash
+python -m agenttrace_sandbox.cli run-manifest \
+  --manifest examples/tasks.jsonl \
+  --output runs/manifest_results.jsonl \
+  --mock
+```
+
 ## Using An API Model
 
 Set an OpenAI-compatible endpoint:
@@ -81,6 +102,8 @@ Set an OpenAI-compatible endpoint:
 export OPENAI_API_KEY=sk-...
 export OPENAI_BASE_URL=https://api.openai.com/v1
 export OPENAI_MODEL=gpt-4o-mini
+export AGENTTRACE_JSON_RETRIES=2
+export AGENTTRACE_MAX_STEPS=8
 ```
 
 Then run without `--mock`:
@@ -99,8 +122,22 @@ Each run creates `runs/<run_id>/trace.jsonl` with events such as:
 ```json
 {"event": "run_started", "payload": {"task": "..."}}
 {"event": "plan", "payload": {"plan": "..."}}
-{"event": "tool_call", "payload": {"tool": "read_file", "arguments": {"path": "calculator.py"}, "result": {"ok": true}}}
-{"event": "run_finished", "payload": {"outcome": "success", "diff": "..."}}
+{"event": "tool_call", "payload": {"tool": "read_file", "arguments": {"path": "calculator.py"}, "raw_output": "{...}", "retries_used": 0, "elapsed_ms": 1.2, "result": {"ok": true}}}
+{"event": "run_finished", "payload": {"outcome": "success", "diff": "...", "elapsed_ms": 45.1}}
+```
+
+Current outcome taxonomy:
+
+```text
+success
+invalid_json
+edit_miss
+test_failed
+blocked_by_policy
+max_steps
+finished_without_tests
+incomplete
+runner_error
 ```
 
 ## SFT Export Shape
@@ -126,7 +163,6 @@ The exporter creates records like:
 ## Roadmap
 
 - Docker sandbox backend with CPU, memory, network, and timeout limits.
-- Failure taxonomy: retrieval failure, edit miss, policy block, test failure, invalid JSON.
 - Trajectory quality scoring.
 - Preference pair export for DPO/RLHF-style training.
 - Multi-model sampling for the same task.
