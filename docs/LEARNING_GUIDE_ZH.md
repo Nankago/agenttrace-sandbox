@@ -1,0 +1,490 @@
+# AgentTrace Sandbox 学习指南
+
+这份文档用通俗方式解释 AgentTrace Sandbox 是什么、怎么跑、代码如何组织，以及它为什么可以作为一个 Coding Agent 后训练项目来讲。
+
+如果你只想先抓住一句话：
+
+> AgentTrace Sandbox 是一个安全采集 Coding Agent 执行轨迹的实验平台：让模型在隔离工作区里读代码、改代码、跑测试，并把每一步变成可分析、可训练的数据。
+
+## 1. 这个项目在解决什么问题
+
+普通 Coding Agent 项目通常只关心最后答案：
+
+```text
+用户给任务 -> 模型改代码 -> 测试通过/失败
+```
+
+但如果你想做后训练，比如 SFT、DPO、RL，你更关心中间过程：
+
+```text
+模型看了哪些文件？
+它为什么选这个工具？
+它有没有按 JSON 协议输出？
+它有没有乱改测试？
+测试失败时失败在哪？
+成功轨迹能不能转成训练数据？
+```
+
+AgentTrace Sandbox 的核心就是把这些过程系统性记录下来。
+
+## 2. 项目主流程
+
+一次任务运行大概是这样：
+
+```text
+输入任务
+  -> 复制目标 repo 到 runs/<run_id>/workspace
+  -> 调用模型生成计划
+  -> 模型每次输出一个 JSON 工具调用
+  -> 本地执行工具
+  -> 记录工具结果
+  -> 如果改了代码，就运行测试
+  -> 记录最终 diff、outcome、trace
+  -> 从 trace 导出 SFT 数据
+```
+
+可以理解成两层：
+
+```text
+第一层：Agent 执行层
+让模型真的操作一个代码仓库。
+
+第二层：数据采集层
+把模型的每一步行为记录成 trace，再转成训练样本。
+```
+
+## 3. 现在已经支持什么
+
+| 能力 | 说明 |
+|---|---|
+| 单任务运行 | 对一个 repo 执行一个自然语言 coding task |
+| 批量任务 | 用 JSONL manifest 批量跑任务 |
+| Mock 模型 | 不需要 API key，也能跑通 demo |
+| 真实 API | 支持 OpenAI-compatible chat completions，例如 DeepSeek |
+| 工具调用 | 支持读文件、搜索、替换、写文件、跑测试、看 diff |
+| 安全限制 | 路径不能逃出 workspace，危险命令会被拦截 |
+| Docker 后端 | 测试命令可在 Docker 容器中执行 |
+| Trace 记录 | 保存 raw output、工具调用、测试结果、耗时、最终 diff |
+| 失败分类 | 记录 success、invalid_json、edit_miss、test_failed 等 outcome |
+| 格式检测 | 标记模型是否输出了非纯 JSON 的可恢复格式 |
+| SFT 导出 | 支持 JSONL 和 Alpaca 格式 |
+| Stats | 统计通过率、失败分布、平均步数、格式违规率 |
+
+## 4. 快速跑通
+
+进入项目：
+
+```bash
+cd agenttrace-sandbox
+```
+
+跑 mock demo：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli run \
+  --repo examples/buggy_calculator \
+  --task "Fix the subtract function bug." \
+  --test-command "python3 -m unittest discover -s tests" \
+  --mock
+```
+
+你会看到类似：
+
+```text
+outcome=success
+steps=5
+trace=runs/<run_id>/trace.jsonl
+summary=Fixed subtract function bug...
+```
+
+批量跑 manifest：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli run-manifest \
+  --manifest examples/tasks.jsonl \
+  --output runs/manifest_results.jsonl \
+  --mock
+```
+
+导出 SFT 数据：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli export-sft \
+  --traces runs \
+  --output data/sft/tool_calls.jsonl
+```
+
+导出 Alpaca 格式：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli export-sft \
+  --traces runs \
+  --output data/sft/tool_calls_alpaca.json \
+  --format alpaca
+```
+
+查看统计：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli stats --runs runs
+```
+
+## 5. 接真实 API 怎么理解
+
+真实 API 模式下，模型不再用固定的 mock 逻辑，而是真的生成工具调用。
+
+需要设置：
+
+```bash
+export OPENAI_API_KEY="your_key"
+export OPENAI_BASE_URL="https://api.deepseek.com"
+export OPENAI_MODEL="deepseek-chat"
+```
+
+然后去掉 `--mock`：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli run \
+  --repo examples/buggy_calculator \
+  --task "Fix the subtract function bug." \
+  --test-command "python3 -m unittest discover -s tests"
+```
+
+注意：不要把 API key 写进 README、代码、trace 或 git commit。真实项目里应该用环境变量或本地 `.env`，并且不要提交 `.env`。
+
+## 6. Docker 沙箱是什么
+
+默认情况下，项目会把 repo 复制到：
+
+```text
+runs/<run_id>/workspace
+```
+
+然后在这个 workspace 里执行测试。
+
+Docker 模式会进一步把测试命令放进容器里跑：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli run-manifest \
+  --manifest examples/tasks.jsonl \
+  --sandbox docker \
+  --docker-image python:3.11-slim \
+  --mock
+```
+
+Docker 模式会使用类似设置：
+
+```text
+--network none
+--memory 1g
+--cpus 1
+--pids-limit 256
+```
+
+它的意义是：真实模型可能会生成不可预测的代码和命令，把测试执行放进受限容器里更安全。
+
+## 7. 代码结构怎么读
+
+建议按这个顺序看源码：
+
+| 文件 | 作用 | 你应该重点看什么 |
+|---|---|---|
+| `src/agenttrace_sandbox/cli.py` | 命令行入口 | 有哪些命令，参数如何传入 |
+| `src/agenttrace_sandbox/config.py` | 配置 | 环境变量如何变成配置 |
+| `src/agenttrace_sandbox/runner.py` | Agent 主循环 | 模型如何一步步调用工具 |
+| `src/agenttrace_sandbox/tools.py` | 工具系统 | read/grep/edit/test/diff 如何执行 |
+| `src/agenttrace_sandbox/sandbox.py` | 沙箱 | local/docker backend 如何跑命令 |
+| `src/agenttrace_sandbox/tracing.py` | trace 写入 | JSONL 事件如何保存 |
+| `src/agenttrace_sandbox/manifest.py` | 批量运行 | JSONL 任务列表如何批量跑 |
+| `src/agenttrace_sandbox/sft_export.py` | SFT 导出 | trace 如何变成训练样本 |
+| `src/agenttrace_sandbox/stats.py` | 统计 | pass rate、format violation 如何统计 |
+| `src/agenttrace_sandbox/llm.py` | 模型接口 | mock 模型和真实 API 如何统一 |
+
+## 8. Agent 主循环详解
+
+核心逻辑在 `runner.py`。
+
+简化后是：
+
+```text
+run_task()
+  -> 创建 Sandbox
+  -> 创建 ToolRegistry
+  -> 写 run_started trace
+  -> 调模型生成 plan
+  -> 循环 max_steps 次：
+       next_action()     # 调模型拿 JSON 工具调用
+       execute_step()    # 执行工具
+       write_event()     # 写 trace
+       判断是否 finish / invalid_json / max_steps
+  -> git_diff
+  -> 写 run_finished trace
+```
+
+这里有两个关键对象：
+
+```text
+StepDecision
+  raw: 模型原始输出
+  action: 解析后的工具调用
+  parse_error: JSON 解析错误
+  retries_used: 修复重试次数
+  format_violation: 是否不是纯 JSON
+```
+
+```text
+ToolResult
+  ok: 工具是否成功
+  output: 工具输出
+  blocked: 是否被安全策略拦截
+  error_type: 错误类型
+```
+
+## 9. 工具调用协议
+
+模型每一步应该输出一个 JSON：
+
+```json
+{
+  "tool": "read_file",
+  "arguments": {
+    "path": "calculator.py"
+  },
+  "reason": "Inspect the implementation before editing."
+}
+```
+
+支持的工具包括：
+
+```text
+list_files
+read_file
+grep
+replace_in_file
+write_file
+run_tests
+git_diff
+finish
+```
+
+为什么要求 JSON？
+
+因为 JSON 可以被程序稳定解析，后面也可以直接拿来做 SFT 数据。
+
+## 10. Trace 长什么样
+
+每次运行会生成：
+
+```text
+runs/<run_id>/trace.jsonl
+```
+
+典型事件：
+
+```json
+{"event": "run_started", "payload": {"task": "..."}}
+{"event": "plan", "payload": {"plan": "..."}}
+{"event": "tool_call", "payload": {"tool": "read_file", "arguments": {"path": "calculator.py"}}}
+{"event": "run_finished", "payload": {"outcome": "success", "diff": "..."}}
+```
+
+真实工具调用里会记录更多字段：
+
+```json
+{
+  "tool": "replace_in_file",
+  "raw_output": "{...}",
+  "parse_error": "",
+  "retries_used": 0,
+  "format_violation": false,
+  "elapsed_ms": 12.3,
+  "result": {
+    "ok": true,
+    "error_type": ""
+  }
+}
+```
+
+这些字段就是后训练数据和分析指标的来源。
+
+## 11. `format_violation` 为什么重要
+
+真实模型有时不会严格输出纯 JSON，而是输出：
+
+````text
+我先读取文件。
+
+```json
+{"tool": "read_file", "arguments": {"path": "calculator.py"}, "reason": "..."}
+```
+````
+
+这种输出可以被系统“救回来”，但它不是干净的工具协议。
+
+所以项目记录：
+
+```json
+"format_violation": true
+```
+
+这样后面可以区分：
+
+```text
+干净样本：format_violation=false 且 result.ok=true
+可恢复样本：format_violation=true 但 JSON 可抽取
+失败样本：parse_error 或 test_failed 或 policy_block
+```
+
+这就是一个很好的创新点：不是只记录成功，而是记录“成功质量”。
+
+## 12. SFT 导出怎么理解
+
+SFT 训练想教模型：
+
+> 给定任务、计划、历史工具轨迹，下一步应该调用什么工具？
+
+导出的样本类似：
+
+```json
+{
+  "instruction": "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON.",
+  "input": {
+    "task": "Fix the subtract function bug.",
+    "plan": "...",
+    "history": []
+  },
+  "output": {
+    "tool": "read_file",
+    "arguments": {
+      "path": "calculator.py"
+    },
+    "reason": "Inspect the implementation."
+  }
+}
+```
+
+也就是说，训练目标不是直接训练“最后答案”，而是训练模型学会 **下一步工具决策**。
+
+## 13. Stats 怎么看
+
+运行：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli stats --runs runs
+```
+
+输出类似：
+
+```json
+{
+  "total_runs": 14,
+  "outcomes": {
+    "success": 14
+  },
+  "pass_rate": 1.0,
+  "avg_steps": 5.71,
+  "avg_elapsed_ms": 4173.29,
+  "format_violation_rate": 0.0,
+  "backends": {
+    "local": 11,
+    "unknown": 3
+  }
+}
+```
+
+重点看：
+
+| 字段 | 含义 |
+|---|---|
+| `total_runs` | 总共统计了多少次运行 |
+| `outcomes` | 成功、失败、格式错误等分布 |
+| `pass_rate` | 成功率 |
+| `avg_steps` | 平均工具步数 |
+| `avg_elapsed_ms` | 平均耗时 |
+| `format_violation_rate` | 非纯 JSON 输出比例 |
+| `backends` | local/docker 使用情况 |
+
+## 14. 可以怎么讲创新点
+
+这个项目不只是“写了一个 agent demo”，可以这样讲：
+
+### 1. 安全轨迹采集
+
+模型不是直接操作原仓库，而是在隔离 workspace 中执行，后续还能使用 Docker 限制网络、内存和 CPU。
+
+### 2. 协议遵循度评估
+
+不仅看模型有没有成功，还看它是否严格按 JSON 工具协议输出。
+
+### 3. 成功质量分层
+
+把轨迹分成：
+
+```text
+clean success
+recovered success
+test failure
+policy block
+invalid JSON
+edit miss
+```
+
+这比单纯 pass/fail 更适合后训练数据筛选。
+
+### 4. 最小 diff 行为分析
+
+真实模型可能会多改测试或做额外修改。项目可以把“是否最小修改”作为后续质量评分维度。
+
+### 5. 模型来源可追踪
+
+trace 记录 provider、model、temperature，方便比较不同模型的轨迹质量。
+
+### 6. 后训练数据闭环
+
+项目可以从真实执行轨迹生成 SFT 数据，后面还能扩展到 DPO：
+
+```text
+chosen: clean/minimal success
+rejected: noisy/over-editing/failure trace
+```
+
+## 15. 推荐学习路线
+
+如果你想彻底理解这个项目，建议这样学：
+
+1. 先跑 `--mock` demo，看一次 trace。
+2. 打开 `runner.py`，理解 `run_task()` 主循环。
+3. 打开 `tools.py`，理解工具如何真正改文件和跑测试。
+4. 打开 `sandbox.py`，理解 local/docker 的区别。
+5. 打开 `sft_export.py`，理解 trace 如何变成训练样本。
+6. 打开 `stats.py`，理解如何从 trace 统计指标。
+7. 最后读 `docs/REAL_API_TRACE_NOTES.md`，理解真实 API 暴露了哪些工程问题。
+
+## 16. 下一步可以做什么
+
+比较自然的下一步：
+
+```text
+1. strict SFT export
+   只导出 format_violation=false 且 result.ok=true 的样本。
+
+2. doctor 命令
+   检查 Docker、API 环境变量、Python 版本，但不打印 key。
+
+3. trajectory quality score
+   综合 success、format_violation、test result、diff size、是否改测试。
+
+4. 更多 toy tasks
+   构造 20-50 个小任务，展示批量采集统计。
+
+5. DPO pair export
+   用 clean success 和 noisy/failure trace 构造偏好数据。
+```
+
+如果只选一个，我建议先做：
+
+```text
+strict SFT export + quality score
+```
+
+因为这能直接把“轨迹采集”升级成“高质量后训练数据构建”。
