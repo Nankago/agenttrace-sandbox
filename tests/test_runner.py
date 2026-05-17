@@ -6,7 +6,9 @@ from agenttrace_sandbox.config import AgentConfig
 from agenttrace_sandbox.llm import MockCodingModel
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
+from agenttrace_sandbox.sandbox import build_docker_command
 from agenttrace_sandbox.sft_export import export_sft
+from agenttrace_sandbox.stats import compute_run_stats
 
 
 class BadJsonModel:
@@ -48,6 +50,11 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(alpaca_count, count)
             alpaca_rows = json.loads(alpaca_path.read_text(encoding="utf-8"))
             self.assertIn("system", alpaca_rows[0])
+
+            stats = compute_run_stats(tmp_path / "runs")
+            self.assertEqual(stats.total_runs, 1)
+            self.assertEqual(stats.outcomes.get("success"), 1)
+            self.assertEqual(stats.backends.get("local"), 1)
 
     def test_invalid_json_is_classified(self) -> None:
         import tempfile
@@ -95,3 +102,23 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(summary.ran, 1)
             self.assertEqual(summary.outcomes.get("success"), 1)
             self.assertIn('"outcome": "success"', output.read_text(encoding="utf-8"))
+
+    def test_docker_command_is_restricted(self) -> None:
+        command = build_docker_command(
+            workspace=Path("/tmp/workspace"),
+            command="python3 -m unittest discover -s tests",
+            image="python:3.11-slim",
+            network="none",
+            memory="512m",
+            cpus="0.5",
+        )
+
+        self.assertEqual(command[:3], ["docker", "run", "--rm"])
+        self.assertIn("--network", command)
+        self.assertIn("none", command)
+        self.assertIn("--memory", command)
+        self.assertIn("512m", command)
+        self.assertIn("--cpus", command)
+        self.assertIn("0.5", command)
+        self.assertIn("/tmp/workspace:/workspace", command)
+        self.assertEqual(command[-3:], ["sh", "-lc", "python3 -m unittest discover -s tests"])

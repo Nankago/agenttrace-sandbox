@@ -45,7 +45,9 @@ This is an independent MVP implementation for learning and extension. It is insp
 - Writes JSONL traces for every run.
 - Records raw model output, retry count, step latency, final diff, and run latency.
 - Classifies outcomes such as `success`, `invalid_json`, `edit_miss`, `test_failed`, `blocked_by_policy`, and `max_steps`.
+- Supports `local` and `docker` test execution backends.
 - Runs JSONL task manifests for batch trajectory collection.
+- Summarizes run pass rate, failure distribution, average steps, and sandbox backend usage.
 - Exports successful tool calls into JSONL or Alpaca-style SFT data.
 
 ## Quick Start
@@ -94,6 +96,22 @@ python -m agenttrace_sandbox.cli run-manifest \
   --mock
 ```
 
+Summarize collected runs:
+
+```bash
+python -m agenttrace_sandbox.cli stats --runs runs
+```
+
+Run tests inside Docker instead of the host Python environment:
+
+```bash
+python -m agenttrace_sandbox.cli run-manifest \
+  --manifest examples/tasks.jsonl \
+  --sandbox docker \
+  --docker-image python:3.11-slim \
+  --mock
+```
+
 ## Using An API Model
 
 Set an OpenAI-compatible endpoint:
@@ -104,6 +122,11 @@ export OPENAI_BASE_URL=https://api.openai.com/v1
 export OPENAI_MODEL=gpt-4o-mini
 export AGENTTRACE_JSON_RETRIES=2
 export AGENTTRACE_MAX_STEPS=8
+export AGENTTRACE_SANDBOX=docker
+export AGENTTRACE_DOCKER_IMAGE=python:3.11-slim
+export AGENTTRACE_DOCKER_NETWORK=none
+export AGENTTRACE_DOCKER_MEMORY=1g
+export AGENTTRACE_DOCKER_CPUS=1
 ```
 
 Then run without `--mock`:
@@ -124,6 +147,12 @@ Each run creates `runs/<run_id>/trace.jsonl` with events such as:
 {"event": "plan", "payload": {"plan": "..."}}
 {"event": "tool_call", "payload": {"tool": "read_file", "arguments": {"path": "calculator.py"}, "raw_output": "{...}", "retries_used": 0, "elapsed_ms": 1.2, "result": {"ok": true}}}
 {"event": "run_finished", "payload": {"outcome": "success", "diff": "...", "elapsed_ms": 45.1}}
+```
+
+When Docker mode is enabled, `run_started` also records the backend and image:
+
+```json
+{"event": "run_started", "payload": {"sandbox_backend": "docker", "docker_image": "python:3.11-slim"}}
 ```
 
 Current outcome taxonomy:
@@ -162,7 +191,6 @@ The exporter creates records like:
 
 ## Roadmap
 
-- Docker sandbox backend with CPU, memory, network, and timeout limits.
 - Trajectory quality scoring.
 - Preference pair export for DPO/RLHF-style training.
 - Multi-model sampling for the same task.

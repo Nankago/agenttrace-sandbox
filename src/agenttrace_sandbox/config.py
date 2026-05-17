@@ -15,6 +15,11 @@ class AgentConfig:
     max_steps: int = 8
     json_retries: int = 2
     command_timeout: int = 30
+    sandbox_backend: str = "local"
+    docker_image: str = "python:3.11-slim"
+    docker_network: str = "none"
+    docker_memory: str = "1g"
+    docker_cpus: str = "1"
     runs_dir: Path = Path("runs")
 
     @classmethod
@@ -28,5 +33,10 @@ class AgentConfig:
             max_steps=int(os.getenv("AGENTTRACE_MAX_STEPS", "8")),
             json_retries=int(os.getenv("AGENTTRACE_JSON_RETRIES", "2")),
             command_timeout=int(os.getenv("AGENTTRACE_COMMAND_TIMEOUT", "30")),
+            sandbox_backend=os.getenv("AGENTTRACE_SANDBOX", "local"),
+            docker_image=os.getenv("AGENTTRACE_DOCKER_IMAGE", "python:3.11-slim"),
+            docker_network=os.getenv("AGENTTRACE_DOCKER_NETWORK", "none"),
+            docker_memory=os.getenv("AGENTTRACE_DOCKER_MEMORY", "1g"),
+            docker_cpus=os.getenv("AGENTTRACE_DOCKER_CPUS", "1"),
             runs_dir=Path(os.getenv("AGENTTRACE_RUNS_DIR", "runs")),
         )

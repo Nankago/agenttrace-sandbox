@@ -34,13 +34,28 @@ class RunResult:
 
 def run_task(repo: Path, task: str, test_command: str, config: AgentConfig, model: ChatModel) -> RunResult:
     started_at = time.perf_counter()
-    sandbox = Sandbox.create(repo, config.runs_dir)
+    sandbox = Sandbox.create(
+        repo,
+        config.runs_dir,
+        backend=config.sandbox_backend,
+        docker_image=config.docker_image,
+        docker_network=config.docker_network,
+        docker_memory=config.docker_memory,
+        docker_cpus=config.docker_cpus,
+    )
     tools = ToolRegistry(sandbox, timeout=config.command_timeout)
     history: list[dict[str, Any]] = []
     write_event(
         sandbox.trace_path,
         "run_started",
-        {"run_id": sandbox.run_id, "source_repo": str(sandbox.source_repo), "workspace": str(sandbox.workspace), "task": task},
+        {
+            "run_id": sandbox.run_id,
+            "source_repo": str(sandbox.source_repo),
+            "workspace": str(sandbox.workspace),
+            "task": task,
+            "sandbox_backend": sandbox.backend,
+            "docker_image": sandbox.docker_image if sandbox.backend == "docker" else "",
+        },
     )
 
     plan = model.complete(PLANNER_SYSTEM, f"Create a concise plan for this task:\n{task}")

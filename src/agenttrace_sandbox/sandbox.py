@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import shutil
+import shlex
 import subprocess
 import uuid
 from dataclasses import dataclass
@@ -29,15 +30,41 @@ class Sandbox:
     source_repo: Path
     workspace: Path
     trace_path: Path
+    backend: str = "local"
+    docker_image: str = "python:3.11-slim"
+    docker_network: str = "none"
+    docker_memory: str = "1g"
+    docker_cpus: str = "1"
 
     @classmethod
-    def create(cls, source_repo: Path, runs_dir: Path) -> "Sandbox":
+    def create(
+        cls,
+        source_repo: Path,
+        runs_dir: Path,
+        backend: str = "local",
+        docker_image: str = "python:3.11-slim",
+        docker_network: str = "none",
+        docker_memory: str = "1g",
+        docker_cpus: str = "1",
+    ) -> "Sandbox":
         run_id = uuid.uuid4().hex[:12]
         root = runs_dir / run_id
         workspace = root / "workspace"
         trace_path = root / "trace.jsonl"
         copy_repo(source_repo.resolve(), workspace)
-        return cls(run_id=run_id, source_repo=source_repo.resolve(), workspace=workspace.resolve(), trace_path=trace_path.resolve())
+        if backend not in {"local", "docker"}:
+            raise ValueError(f"unsupported sandbox backend: {backend}")
+        return cls(
+            run_id=run_id,
+            source_repo=source_repo.resolve(),
+            workspace=workspace.resolve(),
+            trace_path=trace_path.resolve(),
+            backend=backend,
+            docker_image=docker_image,
+            docker_network=docker_network,
+            docker_memory=docker_memory,
+            docker_cpus=docker_cpus,
+        )
 
     def resolve(self, candidate: str | Path) -> Path:
         path = (self.workspace / candidate).resolve() if not Path(candidate).is_absolute() else Path(candidate).resolve()
@@ -63,8 +90,10 @@ class Sandbox:
 
     def run_command(self, command: str, timeout: int) -> tuple[bool, str]:
         self.validate_command(command)
+        if self.backend == "docker":
+            return self.run_docker_command(command, timeout)
         completed = subprocess.run(
-            command.split(),
+            shlex.split(command),
             cwd=self.workspace,
             text=True,
             capture_output=True,
@@ -73,6 +102,52 @@ class Sandbox:
         )
         output = (completed.stdout + "\n" + completed.stderr).strip()
         return completed.returncode == 0, output or f"command exited with {completed.returncode}"
+
+    def run_docker_command(self, command: str, timeout: int) -> tuple[bool, str]:
+        docker_cmd = build_docker_command(
+            workspace=self.workspace,
+            command=command,
+            image=self.docker_image,
+            network=self.docker_network,
+            memory=self.docker_memory,
+            cpus=self.docker_cpus,
+        )
+        try:
+            completed = subprocess.run(
+                docker_cmd,
+                text=True,
+                capture_output=True,
+                timeout=timeout,
+                check=False,
+            )
+        except FileNotFoundError:
+            return False, "docker executable not found; install Docker or use --sandbox local"
+        output = (completed.stdout + "\n" + completed.stderr).strip()
+        return completed.returncode == 0, output or f"docker command exited with {completed.returncode}"
+
+
+def build_docker_command(workspace: Path, command: str, image: str, network: str, memory: str, cpus: str) -> list[str]:
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        network,
+        "--memory",
+        memory,
+        "--cpus",
+        cpus,
+        "--pids-limit",
+        "256",
+        "-v",
+        f"{workspace}:/workspace",
+        "-w",
+        "/workspace",
+        image,
+        "sh",
+        "-lc",
+        command,
+    ]
 
 
 def copy_repo(source: Path, destination: Path) -> None:
