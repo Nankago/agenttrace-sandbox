@@ -1,0 +1,16 @@
+[project]
+name = "agenttrace-sandbox"
+version = "0.1.0"
+description = "A safe trajectory collection MVP for coding-agent post-training."
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+agenttrace = "agenttrace_sandbox.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
