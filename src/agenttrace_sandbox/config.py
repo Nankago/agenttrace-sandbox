@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 
@@ -40,3 +40,7 @@ class AgentConfig:
             docker_cpus=os.getenv("AGENTTRACE_DOCKER_CPUS", "1"),
             runs_dir=Path(os.getenv("AGENTTRACE_RUNS_DIR", "runs")),
         )
+
+    def with_overrides(self, **kwargs) -> "AgentConfig":
+        values = {key: value for key, value in kwargs.items() if value is not None}
+        return replace(self, **values)

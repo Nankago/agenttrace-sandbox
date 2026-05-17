@@ -19,23 +19,24 @@ def add_sandbox_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--docker-cpus", help="Docker CPU limit, defaults to 1.")
 
 
-def apply_sandbox_args(config: AgentConfig, args: argparse.Namespace) -> AgentConfig:
-    return AgentConfig(
-        provider=config.provider,
-        api_key=config.api_key,
-        base_url=config.base_url,
-        model=config.model,
-        temperature=config.temperature,
-        max_steps=config.max_steps,
-        json_retries=config.json_retries,
-        command_timeout=config.command_timeout,
-        sandbox_backend=args.sandbox or config.sandbox_backend,
-        docker_image=args.docker_image or config.docker_image,
-        docker_network=args.docker_network or config.docker_network,
-        docker_memory=args.docker_memory or config.docker_memory,
-        docker_cpus=args.docker_cpus or config.docker_cpus,
-        runs_dir=config.runs_dir,
+def config_from_args(args: argparse.Namespace) -> AgentConfig:
+    config = AgentConfig.from_env()
+    return config.with_overrides(
+        sandbox_backend=getattr(args, "sandbox", None),
+        docker_image=getattr(args, "docker_image", None),
+        docker_network=getattr(args, "docker_network", None),
+        docker_memory=getattr(args, "docker_memory", None),
+        docker_cpus=getattr(args, "docker_cpus", None),
     )
+
+
+def model_from_args(args: argparse.Namespace, config: AgentConfig):
+    return MockCodingModel() if getattr(args, "mock", False) else OpenAICompatibleChat(config)
+
+
+def print_result(**items) -> None:
+    for key, value in items.items():
+        print(f"{key}={value}")
 
 
 def main() -> None:
@@ -67,24 +68,22 @@ def main() -> None:
 
     args = parser.parse_args()
     if args.command == "run":
-        config = apply_sandbox_args(AgentConfig.from_env(), args)
-        model = MockCodingModel() if args.mock else OpenAICompatibleChat(config)
+        config = config_from_args(args)
+        model = model_from_args(args, config)
         result = run_task(args.repo, args.task, args.test_command, config, model)
-        print(f"run_id={result.run_id}")
-        print(f"outcome={result.outcome}")
-        print(f"steps={result.steps}")
-        print(f"workspace={result.workspace}")
-        print(f"trace={result.trace_path}")
-        print(f"summary={result.final_summary}")
+        print_result(
+            run_id=result.run_id,
+            outcome=result.outcome,
+            steps=result.steps,
+            workspace=result.workspace,
+            trace=result.trace_path,
+            summary=result.final_summary,
+        )
     elif args.command == "run-manifest":
-        config = apply_sandbox_args(AgentConfig.from_env(), args)
-        model = MockCodingModel() if args.mock else OpenAICompatibleChat(config)
+        config = config_from_args(args)
+        model = model_from_args(args, config)
         summary = run_manifest(args.manifest, config, model, args.output, limit=args.limit, dry_run=args.dry_run)
-        print(f"total={summary.total}")
-        print(f"ran={summary.ran}")
-        print(f"skipped={summary.skipped}")
-        print(f"outcomes={summary.outcomes}")
-        print(f"output={summary.output_path}")
+        print_result(total=summary.total, ran=summary.ran, skipped=summary.skipped, outcomes=summary.outcomes, output=summary.output_path)
     elif args.command == "export-sft":
         count = export_sft(args.traces, args.output, output_format=args.format)
         print(f"wrote {count} samples to {args.output}")

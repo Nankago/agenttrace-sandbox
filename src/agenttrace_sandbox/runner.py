@@ -32,6 +32,14 @@ class RunResult:
     final_summary: str
 
 
+@dataclass(frozen=True)
+class StepDecision:
+    raw: str
+    action: dict[str, Any]
+    parse_error: str
+    retries_used: int
+
+
 def run_task(repo: Path, task: str, test_command: str, config: AgentConfig, model: ChatModel) -> RunResult:
     started_at = time.perf_counter()
     sandbox = Sandbox.create(
@@ -64,8 +72,7 @@ def run_task(repo: Path, task: str, test_command: str, config: AgentConfig, mode
     final_summary = ""
     outcome = "incomplete"
     for step in range(1, config.max_steps + 1):
-        step_started_at = time.perf_counter()
-        raw, action, parse_error, retries_used = next_action(
+        decision = next_action(
             model=model,
             task=task,
             test_command=test_command,
@@ -74,36 +81,16 @@ def run_task(repo: Path, task: str, test_command: str, config: AgentConfig, mode
             history=history,
             max_retries=config.json_retries,
         )
-        tool = str(action.get("tool", ""))
-        arguments = action.get("arguments", {})
-        if not isinstance(arguments, dict):
-            arguments = {}
-
-        if tool == "run_tests" and not arguments.get("command"):
-            arguments["command"] = test_command
-        result = tools.run(tool, arguments)
-        if parse_error:
-            result = ToolResult(False, parse_error, error_type="invalid_json")
-        elapsed_ms = round((time.perf_counter() - step_started_at) * 1000, 2)
-        record = {
-            "tool": tool,
-            "arguments": arguments,
-            "reason": action.get("reason", ""),
-            "raw_output": raw,
-            "parse_error": parse_error,
-            "retries_used": retries_used,
-            "elapsed_ms": elapsed_ms,
-            "result": result_to_dict(result),
-        }
+        record = execute_step(decision, tools, test_command)
         history.append(record)
         write_event(sandbox.trace_path, "tool_call", {"step": step, **record})
 
-        if parse_error:
-            final_summary = str(arguments.get("summary") or f"Invalid model JSON: {parse_error}")
+        if decision.parse_error:
+            final_summary = str(decision.action.get("arguments", {}).get("summary") or f"Invalid model JSON: {decision.parse_error}")
             outcome = classify_outcome(history, max_steps_reached=False)
             break
-        if tool == "finish":
-            final_summary = str(arguments.get("summary", result.output))
+        if record["tool"] == "finish":
+            final_summary = str(record["arguments"].get("summary", record["result"]["output"]))
             outcome = classify_outcome(history, max_steps_reached=False)
             break
     else:
@@ -135,12 +122,12 @@ def next_action(
     tools: str,
     history: list[dict[str, Any]],
     max_retries: int,
-) -> tuple[str, dict[str, Any], str, int]:
+) -> StepDecision:
     prompt = build_actor_prompt(task, test_command, plan, tools, history)
     raw = model.complete(ACTOR_SYSTEM, prompt)
     for retry in range(max_retries + 1):
         try:
-            return raw, normalize_action(extract_json_object(raw)), "", retry
+            return StepDecision(raw=raw, action=normalize_action(extract_json_object(raw)), parse_error="", retries_used=retry)
         except Exception as exc:  # noqa: BLE001
             if retry >= max_retries:
                 action = {
@@ -148,12 +135,41 @@ def next_action(
                     "arguments": {"summary": f"Invalid model JSON after {max_retries + 1} attempt(s): {exc}"},
                     "reason": "invalid_json",
                 }
-                return raw, action, str(exc), retry
+                return StepDecision(raw=raw, action=action, parse_error=str(exc), retries_used=retry)
             raw = model.complete(
                 REPAIR_SYSTEM,
                 f"Original response was not valid JSON for the tool schema.\nError: {exc}\nResponse:\n{raw}",
             )
-    return raw, {"tool": "finish", "arguments": {"summary": "unreachable"}, "reason": "invalid_json"}, "unreachable", max_retries
+    return StepDecision(
+        raw=raw,
+        action={"tool": "finish", "arguments": {"summary": "unreachable"}, "reason": "invalid_json"},
+        parse_error="unreachable",
+        retries_used=max_retries,
+    )
+
+
+def execute_step(decision: StepDecision, tools: ToolRegistry, test_command: str) -> dict[str, Any]:
+    started_at = time.perf_counter()
+    tool = str(decision.action.get("tool", ""))
+    arguments = decision.action.get("arguments", {})
+    if not isinstance(arguments, dict):
+        arguments = {}
+    if tool == "run_tests" and not arguments.get("command"):
+        arguments["command"] = test_command
+
+    result = tools.run(tool, arguments)
+    if decision.parse_error:
+        result = ToolResult(False, decision.parse_error, error_type="invalid_json")
+    return {
+        "tool": tool,
+        "arguments": arguments,
+        "reason": decision.action.get("reason", ""),
+        "raw_output": decision.raw,
+        "parse_error": decision.parse_error,
+        "retries_used": decision.retries_used,
+        "elapsed_ms": round((time.perf_counter() - started_at) * 1000, 2),
+        "result": result_to_dict(result),
+    }
 
 
 def normalize_action(action: dict[str, Any]) -> dict[str, Any]:
