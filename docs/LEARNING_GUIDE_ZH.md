@@ -145,7 +145,8 @@ PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-benchmark \
 ```bash
 PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-mbpp \
   --output-dir data/benchmarks/mbpp \
-  --limit 20
+  --limit 20 \
+  --dataset-source auto
 ```
 
 构造 HumanEval 任务：
@@ -153,16 +154,42 @@ PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-mbpp \
 ```bash
 PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-humaneval \
   --output-dir data/benchmarks/humaneval \
-  --limit 20
+  --limit 20 \
+  --dataset-source auto
 ```
 
-这两个命令会优先尝试读取公开 benchmark 数据集。如果本机没有 `datasets` 包，或者服务器不能联网，就会自动退回到内置的小样例，所以你仍然可以完整跑通 pipeline。
+`--dataset-source` 可以选：
 
-如果你想拉取公开数据集，可以安装可选依赖：
+```text
+auto        优先尝试 ModelScope，再尝试 Hugging Face，最后 fallback 到内置样例
+modelscope  只尝试 ModelScope，失败则 fallback 到内置样例
+huggingface 只尝试 Hugging Face，失败则 fallback 到内置样例
+offline     只使用内置样例
+```
+
+如果你想从 Hugging Face 拉取公开数据集，可以安装：
 
 ```bash
 pip install -e ".[benchmarks]"
 ```
+
+如果你想从 ModelScope 拉取数据集，可以安装：
+
+```bash
+pip install -e ".[modelscope]"
+export MODELSCOPE_SDK_TOKEN="your_token_here"
+```
+
+也支持用 `MODELSCOPE_API_TOKEN` 这个环境变量名。
+
+默认 ModelScope 数据集 id 是：
+
+```text
+MBPP: OmniData/MBPP
+HumanEval: openai-mirror/openai_humaneval
+```
+
+如果你要换成别的数据集，可以加 `--modelscope-dataset <dataset_id>`。
 
 这会生成：
 

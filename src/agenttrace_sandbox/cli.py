@@ -77,12 +77,16 @@ def main() -> None:
     mbpp_parser.add_argument("--limit", type=int, default=20)
     mbpp_parser.add_argument("--split", default="test")
     mbpp_parser.add_argument("--input", type=Path, help="Optional local MBPP JSONL records.")
+    mbpp_parser.add_argument("--dataset-source", choices=["auto", "modelscope", "huggingface", "offline"], default="auto")
+    mbpp_parser.add_argument("--modelscope-dataset", default="OmniData/MBPP")
 
     humaneval_parser = sub.add_parser("build-humaneval", help="Build runnable HumanEval-style function implementation tasks.")
     humaneval_parser.add_argument("--output-dir", default=Path("data/benchmarks/humaneval"), type=Path)
     humaneval_parser.add_argument("--limit", type=int, default=20)
     humaneval_parser.add_argument("--split", default="test")
     humaneval_parser.add_argument("--input", type=Path, help="Optional local HumanEval JSONL records.")
+    humaneval_parser.add_argument("--dataset-source", choices=["auto", "modelscope", "huggingface", "offline"], default="auto")
+    humaneval_parser.add_argument("--modelscope-dataset", default="openai-mirror/openai_humaneval")
 
     wiki_parser = sub.add_parser("build-pr-wiki", help="Build repair wiki records from PR/Issue JSONL.")
     wiki_parser.add_argument("--input", required=True, type=Path)
@@ -114,9 +118,27 @@ def main() -> None:
     elif args.command == "build-benchmark":
         print(build_benchmark_tasks(args.output_dir, limit=args.limit, source_path=args.input).render())
     elif args.command == "build-mbpp":
-        print(build_mbpp_tasks(args.output_dir, limit=args.limit, split=args.split, source_path=args.input).render())
+        print(
+            build_mbpp_tasks(
+                args.output_dir,
+                limit=args.limit,
+                split=args.split,
+                source_path=args.input,
+                dataset_source=args.dataset_source,
+                modelscope_dataset=args.modelscope_dataset,
+            ).render()
+        )
     elif args.command == "build-humaneval":
-        print(build_humaneval_tasks(args.output_dir, limit=args.limit, split=args.split, source_path=args.input).render())
+        print(
+            build_humaneval_tasks(
+                args.output_dir,
+                limit=args.limit,
+                split=args.split,
+                source_path=args.input,
+                dataset_source=args.dataset_source,
+                modelscope_dataset=args.modelscope_dataset,
+            ).render()
+        )
     elif args.command == "build-pr-wiki":
         print(build_pr_wiki(args.input, args.output).render())
 

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -108,6 +111,13 @@ OFFLINE_HUMANEVAL_ROWS = [
 ]
 
 
+HF_MBPP_DATASET = "google-research-datasets/mbpp"
+HF_HUMANEVAL_DATASET = "openai/openai_humaneval"
+MODELSCOPE_MBPP_DATASET = "OmniData/MBPP"
+MODELSCOPE_HUMANEVAL_DATASET = "openai-mirror/openai_humaneval"
+DATASET_SOURCES = {"auto", "modelscope", "huggingface", "offline"}
+
+
 def build_benchmark_tasks(output_dir: Path, limit: int = 5, source_path: Path | None = None) -> BuildSummary:
     records = list(read_jsonl(source_path)) if source_path else OFFLINE_BENCHMARK_TASKS
     selected = records[:limit]
@@ -140,8 +150,25 @@ def build_benchmark_tasks(output_dir: Path, limit: int = 5, source_path: Path | 
     return BuildSummary(count=len(selected), output_path=manifest_path, extra_path=repo_root)
 
 
-def build_mbpp_tasks(output_dir: Path, limit: int = 20, split: str = "test", source_path: Path | None = None) -> BuildSummary:
-    rows = list(read_jsonl(source_path)) if source_path else load_dataset_rows("google-research-datasets/mbpp", split, OFFLINE_MBPP_ROWS)
+def build_mbpp_tasks(
+    output_dir: Path,
+    limit: int = 20,
+    split: str = "test",
+    source_path: Path | None = None,
+    dataset_source: str = "auto",
+    modelscope_dataset: str = MODELSCOPE_MBPP_DATASET,
+) -> BuildSummary:
+    rows = (
+        list(read_jsonl(source_path))
+        if source_path
+        else load_dataset_rows(
+            hf_dataset_name=HF_MBPP_DATASET,
+            split=split,
+            fallback=OFFLINE_MBPP_ROWS,
+            dataset_source=dataset_source,
+            modelscope_dataset_name=modelscope_dataset,
+        )
+    )
     repo_root = output_dir / "repos"
     manifest_path = output_dir / "tasks.jsonl"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -179,8 +206,25 @@ def build_mbpp_tasks(output_dir: Path, limit: int = 20, split: str = "test", sou
     return BuildSummary(count=count, output_path=manifest_path, extra_path=repo_root)
 
 
-def build_humaneval_tasks(output_dir: Path, limit: int = 20, split: str = "test", source_path: Path | None = None) -> BuildSummary:
-    rows = list(read_jsonl(source_path)) if source_path else load_dataset_rows("openai/openai_humaneval", split, OFFLINE_HUMANEVAL_ROWS)
+def build_humaneval_tasks(
+    output_dir: Path,
+    limit: int = 20,
+    split: str = "test",
+    source_path: Path | None = None,
+    dataset_source: str = "auto",
+    modelscope_dataset: str = MODELSCOPE_HUMANEVAL_DATASET,
+) -> BuildSummary:
+    rows = (
+        list(read_jsonl(source_path))
+        if source_path
+        else load_dataset_rows(
+            hf_dataset_name=HF_HUMANEVAL_DATASET,
+            split=split,
+            fallback=OFFLINE_HUMANEVAL_ROWS,
+            dataset_source=dataset_source,
+            modelscope_dataset_name=modelscope_dataset,
+        )
+    )
     repo_root = output_dir / "repos"
     manifest_path = output_dir / "tasks.jsonl"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -270,13 +314,114 @@ def write_humaneval_repo(repo_path: Path, prompt: str, entry_point: str, test: s
     (repo_path / "AGENT.md").write_text("Implement the target function. Run tests after editing.\n", encoding="utf-8")
 
 
-def load_dataset_rows(dataset_name: str, split: str, fallback: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def load_dataset_rows(
+    hf_dataset_name: str,
+    split: str,
+    fallback: list[dict[str, Any]],
+    dataset_source: str = "auto",
+    modelscope_dataset_name: str | None = None,
+) -> list[dict[str, Any]]:
+    if dataset_source not in DATASET_SOURCES:
+        raise ValueError(f"unknown dataset source: {dataset_source}")
+    if dataset_source == "offline":
+        return fallback
+
+    if dataset_source in {"auto", "modelscope"} and modelscope_dataset_name:
+        rows = load_modelscope_rows(modelscope_dataset_name, split)
+        if rows or dataset_source == "modelscope":
+            return rows or fallback
+
+    if dataset_source in {"auto", "huggingface"}:
+        rows = load_huggingface_rows(hf_dataset_name, split)
+        if rows or dataset_source == "huggingface":
+            return rows or fallback
+
+    return fallback
+
+
+def load_modelscope_rows(dataset_name: str, split: str) -> list[dict[str, Any]]:
+    if dataset_name == MODELSCOPE_MBPP_DATASET:
+        rows = load_modelscope_jsonl_file(dataset_name, "raw/mbpp.jsonl")
+        if rows:
+            return rows
+
+    try:
+        from modelscope.msdatasets import MsDataset  # type: ignore
+    except Exception:
+        return []
+
+    token = os.getenv("MODELSCOPE_SDK_TOKEN") or os.getenv("MODELSCOPE_API_TOKEN")
+    if token and not os.getenv("MODELSCOPE_SDK_TOKEN"):
+        os.environ["MODELSCOPE_SDK_TOKEN"] = token
+
+    for candidate_split in unique_values([split, "train", "test", "validation", "dev"]):
+        try:
+            dataset = MsDataset.load(dataset_name, split=candidate_split)
+            rows = rows_from_loaded_dataset(dataset, candidate_split)
+            if rows:
+                return rows
+        except Exception:
+            continue
+
+    try:
+        return rows_from_loaded_dataset(MsDataset.load(dataset_name), split)
+    except Exception:
+        return []
+
+
+def load_modelscope_jsonl_file(dataset_name: str, file_path: str) -> list[dict[str, Any]]:
+    query = urllib.parse.urlencode({"Source": "SDK", "Revision": "master", "FilePath": file_path, "View": "False"})
+    url = f"https://www.modelscope.cn/api/v1/datasets/{dataset_name}/repo?{query}"
+    request = urllib.request.Request(url)
+    token = os.getenv("MODELSCOPE_SDK_TOKEN") or os.getenv("MODELSCOPE_API_TOKEN")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            text = response.read().decode("utf-8")
+    except Exception:
+        return []
+
+    rows: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            return []
+        if isinstance(row, dict):
+            rows.append(row)
+    return rows
+
+
+def load_huggingface_rows(dataset_name: str, split: str) -> list[dict[str, Any]]:
     try:
         from datasets import load_dataset  # type: ignore
 
-        return list(load_dataset(dataset_name, split=split))
+        return rows_from_loaded_dataset(load_dataset(dataset_name, split=split), split)
     except Exception:
-        return fallback
+        return []
+
+
+def rows_from_loaded_dataset(dataset: Any, split: str) -> list[dict[str, Any]]:
+    if isinstance(dataset, dict):
+        dataset = dataset.get(split) or dataset.get("train") or next(iter(dataset.values()), [])
+    rows: list[dict[str, Any]] = []
+    for row in dataset:
+        if isinstance(row, dict):
+            rows.append(dict(row))
+    return rows
+
+
+def unique_values(values: list[str]) -> list[str]:
+    seen: set[str] = set()
+    unique: list[str] = []
+    for value in values:
+        if value and value not in seen:
+            unique.append(value)
+            seen.add(value)
+    return unique
 
 
 def extract_function_name(code: str) -> str | None:

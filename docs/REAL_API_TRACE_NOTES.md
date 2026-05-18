@@ -269,3 +269,16 @@ rejected: recovered/noisy/over-editing trace
 ```
 
 - Add model comparison stats grouped by `model`.
+
+## ModelScope Dataset Loading Notes
+
+When adding ModelScope as a benchmark source, two practical issues appeared:
+
+- Installing `modelscope` alone was not enough in the local Python environment; importing `MsDataset` also required runtime packages such as `numpy`, `datasets`, and `addict`.
+- ModelScope dataset split names can differ from the Hugging Face mirror. For example, `openai-mirror/openai_humaneval` exposes the expected `test` split, while `OmniData/MBPP` exposes `train` rather than `test`.
+
+Implemented response:
+
+- Added a `modelscope` optional dependency group that includes the required runtime packages.
+- Added a ModelScope loader that uses `MODELSCOPE_SDK_TOKEN` or `MODELSCOPE_API_TOKEN` from the environment without printing or storing the token.
+- Added split fallback logic for ModelScope datasets: requested split, then `train`, `test`, `validation`, and `dev`.

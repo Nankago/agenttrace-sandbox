@@ -3,7 +3,14 @@ import json
 from pathlib import Path
 
 from agenttrace_sandbox.config import AgentConfig
-from agenttrace_sandbox.data_builders import build_benchmark_tasks, build_humaneval_tasks, build_mbpp_tasks, build_pr_wiki
+from agenttrace_sandbox.data_builders import (
+    build_benchmark_tasks,
+    build_humaneval_tasks,
+    build_mbpp_tasks,
+    build_pr_wiki,
+    load_dataset_rows,
+    rows_from_loaded_dataset,
+)
 from agenttrace_sandbox.llm import MockCodingModel
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
@@ -148,7 +155,7 @@ class RunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            summary = build_mbpp_tasks(root / "mbpp", limit=1)
+            summary = build_mbpp_tasks(root / "mbpp", limit=1, dataset_source="offline")
             manifest = summary.output_path
             rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
 
@@ -167,7 +174,7 @@ class RunnerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
-            summary = build_humaneval_tasks(root / "humaneval", limit=1)
+            summary = build_humaneval_tasks(root / "humaneval", limit=1, dataset_source="offline")
             manifest = summary.output_path
             rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
 
@@ -180,6 +187,13 @@ class RunnerTests(unittest.TestCase):
             dry_run_summary = run_manifest(manifest, AgentConfig(runs_dir=root / "runs"), MockCodingModel(), root / "results.jsonl", dry_run=True)
             self.assertEqual(dry_run_summary.total, 1)
             self.assertEqual(dry_run_summary.skipped, 1)
+
+    def test_dataset_loader_offline_and_split_dict(self) -> None:
+        rows = load_dataset_rows("unused", "test", [{"id": 1}], dataset_source="offline")
+        self.assertEqual(rows, [{"id": 1}])
+
+        loaded = rows_from_loaded_dataset({"train": [{"id": "train"}], "test": [{"id": "test"}]}, "test")
+        self.assertEqual(loaded, [{"id": "test"}])
 
     def test_build_pr_wiki(self) -> None:
         import tempfile

@@ -119,7 +119,8 @@ Build MBPP-style function tasks:
 ```bash
 python -m agenttrace_sandbox.cli build-mbpp \
   --output-dir data/benchmarks/mbpp \
-  --limit 20
+  --limit 20 \
+  --dataset-source auto
 ```
 
 Build HumanEval-style function tasks:
@@ -127,14 +128,35 @@ Build HumanEval-style function tasks:
 ```bash
 python -m agenttrace_sandbox.cli build-humaneval \
   --output-dir data/benchmarks/humaneval \
-  --limit 20
+  --limit 20 \
+  --dataset-source auto
 ```
 
-If the optional `datasets` package is installed, these commands try to load the public benchmark split. Without that dependency or network access, they fall back to tiny built-in seed tasks so the pipeline still runs end to end.
+`--dataset-source` can be `auto`, `modelscope`, `huggingface`, or `offline`.
+
+To use Hugging Face datasets:
 
 ```bash
 pip install -e ".[benchmarks]"
 ```
+
+To use ModelScope datasets:
+
+```bash
+pip install -e ".[modelscope]"
+export MODELSCOPE_SDK_TOKEN=your_token_here
+```
+
+`MODELSCOPE_API_TOKEN` is also accepted as an alias.
+
+The default ModelScope dataset ids are:
+
+```text
+MBPP: OmniData/MBPP
+HumanEval: openai-mirror/openai_humaneval
+```
+
+You can override them with `--modelscope-dataset`. Without optional dependencies or network access, the builders fall back to tiny built-in seed tasks so the pipeline still runs end to end.
 
 Validate the generated manifest without calling a model:
 
