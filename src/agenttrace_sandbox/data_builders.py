@@ -119,6 +119,44 @@ MODELSCOPE_MBPP_DATASET = "OmniData/MBPP"
 MODELSCOPE_HUMANEVAL_DATASET = "openai-mirror/openai_humaneval"
 DATASET_SOURCES = {"auto", "modelscope", "huggingface", "offline"}
 GITHUB_API = "https://api.github.com"
+BUG_FIX_POSITIVE_KEYWORDS = [
+    "fix",
+    "fixed",
+    "fixes",
+    "bug",
+    "regression",
+    "error",
+    "exception",
+    "crash",
+    "failing",
+    "failure",
+    "fail",
+    "broken",
+    "incorrect",
+    "wrong",
+    "issue",
+    "defect",
+    "flaky",
+    "traceback",
+    "TypeError",
+    "ValueError",
+    "AssertionError",
+]
+BUG_FIX_NEGATIVE_KEYWORDS = [
+    "docs",
+    "documentation",
+    "typo",
+    "spelling",
+    "refactor",
+    "cleanup",
+    "style",
+    "formatting",
+    "dependency bump",
+    "release",
+    "changelog",
+    "ci",
+    "test-only",
+]
 
 
 def build_benchmark_tasks(output_dir: Path, limit: int = 5, source_path: Path | None = None) -> BuildSummary:
@@ -304,7 +342,16 @@ def build_unit_completion_tasks(
     return BuildSummary(count=len(targets), output_path=manifest_path, extra_path=repo_root)
 
 
-def fetch_github_prs(repo_full_name: str, output_path: Path, limit: int = 20, state: str = "closed") -> BuildSummary:
+def fetch_github_prs(
+    repo_full_name: str,
+    output_path: Path,
+    limit: int = 20,
+    state: str = "closed",
+    bug_fix_only: bool = False,
+    min_bug_score: float = 2,
+    include_docs_only: bool = False,
+    include_tests_only: bool = False,
+) -> BuildSummary:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     pulls = github_api_json(f"/repos/{repo_full_name}/pulls", {"state": state, "per_page": str(min(limit, 100)), "sort": "updated", "direction": "desc"})
     if not isinstance(pulls, list):
@@ -319,14 +366,15 @@ def fetch_github_prs(repo_full_name: str, output_path: Path, limit: int = 20, st
             if not number:
                 continue
             body = str(pr.get("body") or "")
-            issue_number = linked_issue_number(body)
+            title = str(pr.get("title") or "")
+            issue_number = linked_issue_number(title, body)
             issue = github_api_json(f"/repos/{repo_full_name}/issues/{issue_number}") if issue_number else {}
             diff = github_api_text(f"/repos/{repo_full_name}/pulls/{number}", accept="application/vnd.github.v3.diff")
             record = {
                 "id": f"{repo_full_name}#{number}",
                 "repo": repo_full_name,
                 "pr_number": number,
-                "pr_title": pr.get("title", ""),
+                "pr_title": title,
                 "pr_body": body,
                 "pr_url": pr.get("html_url", ""),
                 "issue_number": issue_number,
@@ -335,6 +383,15 @@ def fetch_github_prs(repo_full_name: str, output_path: Path, limit: int = 20, st
                 "diff": diff,
                 "files": files_from_diff(diff),
             }
+            record.update(bug_fix_quality(record))
+            if bug_fix_only:
+                allowed_structural_exception = (record["docs_only"] and include_docs_only) or (record["tests_only"] and include_tests_only)
+                if record["bug_fix_score"] < min_bug_score or (not record["is_bug_fix"] and not allowed_structural_exception):
+                    continue
+                if record["docs_only"] and not include_docs_only:
+                    continue
+                if record["tests_only"] and not include_tests_only:
+                    continue
             out.write(json.dumps(record, ensure_ascii=False) + "\n")
             count += 1
 
@@ -634,9 +691,121 @@ def github_api_text(path: str, params: dict[str, str] | None = None, accept: str
         return ""
 
 
-def linked_issue_number(text: str) -> int | None:
-    match = re.search(r"\b(?:fixes|fixed|close[sd]?|resolve[sd]?)\s+#(\d+)", text, flags=re.IGNORECASE)
-    return int(match.group(1)) if match else None
+def linked_issue_number(title: str, body: str = "") -> int | None:
+    text = f"{title}\n{body}"
+    strong = re.search(r"\b(?:fix(?:e[sd])?|clos(?:e[sd]?|ing)|resolv(?:e[sd]?|ing))\s+#(\d+)", text, flags=re.IGNORECASE)
+    if strong:
+        return int(strong.group(1))
+    fallback = re.search(r"#(\d+)", text)
+    return int(fallback.group(1)) if fallback else None
+
+
+def is_bug_fix_record(record: dict[str, Any]) -> bool:
+    return bool(bug_fix_quality(record)["is_bug_fix"])
+
+
+def bug_fix_quality(record: dict[str, Any]) -> dict[str, Any]:
+    diff = str(record.get("diff", ""))
+    files = list(record.get("files") or files_from_diff(diff))
+    source_files = [path for path in files if is_source_file(path)]
+    test_files = [path for path in files if is_test_file(path)]
+    docs_only = bool(files) and all(is_docs_or_config_file(path) for path in files)
+    tests_only = bool(files) and bool(test_files) and not source_files
+    text = "\n".join(
+        [
+            str(record.get("pr_title") or ""),
+            str(record.get("pr_body") or ""),
+            str(record.get("issue_title") or ""),
+            str(record.get("issue_body") or ""),
+        ]
+    )
+    diff_text = "\n".join(line for line in diff.splitlines() if line.startswith(("+", "-")) and not line.startswith(("+++", "---")))
+    positive_text = keyword_hits(text, BUG_FIX_POSITIVE_KEYWORDS)
+    positive_diff = keyword_hits(diff_text, BUG_FIX_POSITIVE_KEYWORDS)
+    negative_text = keyword_hits(text, BUG_FIX_NEGATIVE_KEYWORDS)
+
+    score = 0.0
+    reasons: list[str] = []
+    if positive_text:
+        score += min(3, len(positive_text))
+        reasons.append(f"positive text keywords: {', '.join(positive_text[:5])}")
+    if positive_diff:
+        score += 1
+        reasons.append(f"positive diff keywords: {', '.join(positive_diff[:5])}")
+    if record.get("issue_number"):
+        score += 1
+        reasons.append("linked issue")
+    if source_files:
+        score += 1
+        reasons.append("touches source files")
+    if test_files and source_files:
+        score += 0.5
+        reasons.append("touches tests with source")
+    if negative_text:
+        score -= 3
+        reasons.append(f"negative keywords: {', '.join(negative_text[:5])}")
+    if docs_only:
+        score -= 4
+        reasons.append("docs or CI/config only")
+    if tests_only:
+        score -= 3
+        reasons.append("tests only")
+
+    is_bug_fix = score >= 2 and not docs_only and not tests_only
+    return {
+        "is_bug_fix": is_bug_fix,
+        "bug_fix_score": score,
+        "bug_fix_reasons": reasons,
+        "source_files": source_files,
+        "test_files": test_files,
+        "docs_only": docs_only,
+        "tests_only": tests_only,
+    }
+
+
+def keyword_hits(text: str, keywords: list[str]) -> list[str]:
+    lowered = text.lower()
+    hits: list[str] = []
+    for keyword in keywords:
+        pattern = r"\b" + re.escape(keyword.lower()).replace(r"\ ", r"\s+") + r"\b"
+        if re.search(pattern, lowered) and keyword not in hits:
+            hits.append(keyword)
+    return hits
+
+
+def is_source_file(path: str) -> bool:
+    return bool(path) and not is_test_file(path) and not is_docs_or_config_file(path)
+
+
+def is_test_file(path: str) -> bool:
+    lowered = path.lower()
+    name = Path(lowered).name
+    return (
+        lowered.startswith("test/")
+        or lowered.startswith("tests/")
+        or "/test/" in lowered
+        or "/tests/" in lowered
+        or name.startswith("test_")
+        or name.endswith("_test.py")
+        or name.endswith(".test.js")
+        or name.endswith(".spec.js")
+        or name.endswith(".test.ts")
+        or name.endswith(".spec.ts")
+    )
+
+
+def is_docs_or_config_file(path: str) -> bool:
+    lowered = path.lower()
+    name = Path(lowered).name
+    if lowered.startswith(("docs/", "doc/", ".github/", "github/")):
+        return True
+    if name in {"readme", "readme.md", "changelog", "changelog.md", "changes", "changes.md", "license", "license.md"}:
+        return True
+    if name.startswith(("readme.", "changelog.", "changes.")):
+        return True
+    if lowered.endswith((".md", ".rst", ".txt", ".adoc")):
+        return True
+    return lowered.endswith((".yml", ".yaml")) and ("workflow" in lowered or "ci" in lowered)
 
 
 def make_pr_wiki(record: dict[str, Any]) -> dict[str, Any]:
@@ -645,7 +814,15 @@ def make_pr_wiki(record: dict[str, Any]) -> dict[str, Any]:
     issue = compact_text(record.get("issue_body") or record.get("issue") or "")
     pr = compact_text(record.get("pr_body") or record.get("pr") or "")
     title = str(record.get("issue_title") or record.get("pr_title") or record.get("id") or "unknown")
-    return {
+    source_context = {"issue_excerpt": issue[:800], "pr_excerpt": pr[:800]}
+    metadata: dict[str, Any] = {}
+    if "bug_fix_score" in record:
+        metadata["bug_fix_score"] = record.get("bug_fix_score")
+        source_context["bug_fix_score"] = record.get("bug_fix_score")
+    if "bug_fix_reasons" in record:
+        metadata["bug_fix_reasons"] = record.get("bug_fix_reasons")
+        source_context["bug_fix_reasons"] = record.get("bug_fix_reasons")
+    wiki = {
         "id": record.get("id") or safe_id(title),
         "repo": record.get("repo", ""),
         "issue_title": record.get("issue_title", ""),
@@ -656,9 +833,12 @@ def make_pr_wiki(record: dict[str, Any]) -> dict[str, Any]:
             "change_summary": summarize_diff(diff),
             "fix_strategy": "Inspect the affected files, reproduce or reason about the failing behavior, make the smallest fix, then validate with tests.",
             "validation": record.get("test_command") or "Run the relevant unit tests or project test command.",
-            "source_context": {"issue_excerpt": issue[:800], "pr_excerpt": pr[:800]},
+            "source_context": source_context,
         },
     }
+    if metadata:
+        wiki["metadata"] = metadata
+    return wiki
 
 
 def summarize_text(title: str, body: str) -> str:

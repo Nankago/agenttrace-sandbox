@@ -115,6 +115,10 @@ def main() -> None:
     github_parser.add_argument("--output", default=Path("data/github/pr_issue_pairs.jsonl"), type=Path)
     github_parser.add_argument("--limit", type=int, default=20)
     github_parser.add_argument("--state", choices=["open", "closed", "all"], default="closed")
+    github_parser.add_argument("--bug-fix-only", action="store_true", help="Only write PRs that look like bug fixes.")
+    github_parser.add_argument("--min-bug-score", type=float, default=2, help="Minimum bug-fix score used with --bug-fix-only.")
+    github_parser.add_argument("--include-docs-only", action="store_true", help="Allow docs/CI-only PRs through bug-fix filtering.")
+    github_parser.add_argument("--include-tests-only", action="store_true", help="Allow test-only PRs through bug-fix filtering.")
 
     args = parser.parse_args()
     if args.command == "run":
@@ -186,7 +190,18 @@ def main() -> None:
     elif args.command == "build-pr-wiki":
         print(build_pr_wiki(args.input, args.output).render())
     elif args.command == "fetch-github-prs":
-        print(fetch_github_prs(args.repo, args.output, limit=args.limit, state=args.state).render())
+        print(
+            fetch_github_prs(
+                args.repo,
+                args.output,
+                limit=args.limit,
+                state=args.state,
+                bug_fix_only=args.bug_fix_only,
+                min_bug_score=args.min_bug_score,
+                include_docs_only=args.include_docs_only,
+                include_tests_only=args.include_tests_only,
+            ).render()
+        )
 
 
 if __name__ == "__main__":

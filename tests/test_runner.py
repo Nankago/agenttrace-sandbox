@@ -9,6 +9,8 @@ from agenttrace_sandbox.data_builders import (
     build_mbpp_tasks,
     build_pr_wiki,
     build_unit_completion_tasks,
+    bug_fix_quality,
+    is_bug_fix_record,
     linked_issue_number,
     load_dataset_rows,
     rows_from_loaded_dataset,
@@ -246,6 +248,8 @@ class RunnerTests(unittest.TestCase):
                         "issue_title": "subtract is wrong",
                         "issue_body": "subtract returns the sum.",
                         "pr_title": "Fix subtract",
+                        "bug_fix_score": 3,
+                        "bug_fix_reasons": ["positive text keywords: Fix", "touches source files"],
                         "diff": "diff --git a/calculator.py b/calculator.py\n--- a/calculator.py\n+++ b/calculator.py\n@@\n-return a + b\n+return a - b",
                     }
                 )
@@ -259,10 +263,68 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(summary.count, 1)
             self.assertEqual(row["files"], ["calculator.py"])
             self.assertIn("bug_summary", row["wiki"])
+            self.assertEqual(row["metadata"]["bug_fix_score"], 3)
+            self.assertIn("bug_fix_reasons", row["wiki"]["source_context"])
 
     def test_linked_issue_number(self) -> None:
-        self.assertEqual(linked_issue_number("Fixes #123 and updates docs"), 123)
+        self.assertEqual(linked_issue_number("Fixed #37102"), 37102)
+        self.assertEqual(linked_issue_number("Update parser", "Fixes #123 and updates docs"), 123)
+        self.assertEqual(linked_issue_number("Follow up for #456"), 456)
         self.assertEqual(linked_issue_number("No linked issue"), None)
+
+    def test_bug_fix_quality_filters_docs_only(self) -> None:
+        record = {
+            "pr_title": "Fix typo in README",
+            "files": ["README.md"],
+            "diff": "diff --git a/README.md b/README.md\n--- a/README.md\n+++ b/README.md\n@@\n-teh\n+the",
+        }
+
+        quality = bug_fix_quality(record)
+
+        self.assertFalse(quality["is_bug_fix"])
+        self.assertTrue(quality["docs_only"])
+        self.assertFalse(is_bug_fix_record(record))
+
+    def test_bug_fix_quality_accepts_source_and_tests(self) -> None:
+        record = {
+            "pr_title": "Fix ValueError when parsing empty input",
+            "issue_title": "Parser crashes on empty input",
+            "issue_body": "A ValueError traceback is raised.",
+            "files": ["src/parser.py", "tests/test_parser.py"],
+            "issue_number": 123,
+            "diff": (
+                "diff --git a/src/parser.py b/src/parser.py\n"
+                "--- a/src/parser.py\n"
+                "+++ b/src/parser.py\n"
+                "@@\n"
+                "-raise ValueError\n"
+                "+return None\n"
+                "diff --git a/tests/test_parser.py b/tests/test_parser.py\n"
+                "--- a/tests/test_parser.py\n"
+                "+++ b/tests/test_parser.py\n"
+                "@@\n"
+                "+def test_empty_input(): pass"
+            ),
+        }
+
+        quality = bug_fix_quality(record)
+
+        self.assertTrue(quality["is_bug_fix"])
+        self.assertEqual(quality["source_files"], ["src/parser.py"])
+        self.assertEqual(quality["test_files"], ["tests/test_parser.py"])
+        self.assertFalse(quality["tests_only"])
+
+    def test_bug_fix_quality_filters_tests_only(self) -> None:
+        record = {
+            "pr_title": "Fix flaky parser test",
+            "files": ["tests/test_parser.py"],
+            "diff": "diff --git a/tests/test_parser.py b/tests/test_parser.py\n--- a/tests/test_parser.py\n+++ b/tests/test_parser.py\n@@\n+def test_parser_error(): pass",
+        }
+
+        quality = bug_fix_quality(record)
+
+        self.assertFalse(quality["is_bug_fix"])
+        self.assertTrue(quality["tests_only"])
 
     def test_strict_sft_export_filters_noisy_traces(self) -> None:
         import tempfile

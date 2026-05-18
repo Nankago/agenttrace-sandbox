@@ -232,7 +232,7 @@ python -m agenttrace_sandbox.cli build-pr-wiki \
 Fetch GitHub PR/Issue/diff records first:
 
 ```bash
-export GITHUB_TOKEN=ghp_...
+export GITHUB_TOKEN=your_github_token
 
 python -m agenttrace_sandbox.cli fetch-github-prs \
   --repo owner/name \
@@ -242,6 +242,38 @@ python -m agenttrace_sandbox.cli fetch-github-prs \
 ```
 
 Then pass that output to `build-pr-wiki`. `GITHUB_TOKEN` is optional for public repos but recommended for rate limits.
+
+Fetch higher-quality bug-fix PRs only:
+
+```bash
+python -m agenttrace_sandbox.cli fetch-github-prs \
+  --repo django/django \
+  --output data/github/django_bugfix_prs.jsonl \
+  --limit 50 \
+  --state closed \
+  --bug-fix-only \
+  --min-bug-score 2
+```
+
+The bug-fix filter uses PR title/body, linked issue title/body, changed files, and diff text. It favors keywords such as `fix`, `bug`, `regression`, `error`, `exception`, `crash`, `failing`, and common traceback names, while filtering docs-only, CI/config-only, typo/documentation, refactor/cleanup, and test-only PRs by default. `--include-docs-only` and `--include-tests-only` can relax those two structural filters when `--bug-fix-only` is enabled.
+
+Each fetched record includes quality fields:
+
+- `is_bug_fix`: whether the record passes the default bug-fix heuristic.
+- `bug_fix_score`: numeric heuristic score for thresholding.
+- `bug_fix_reasons`: short explanations for the score.
+- `source_files` / `test_files`: changed files split by role.
+- `docs_only` / `tests_only`: structural filters used by the scorer.
+
+Build repair wiki records from the bug-fix JSONL:
+
+```bash
+python -m agenttrace_sandbox.cli build-pr-wiki \
+  --input data/github/django_bugfix_prs.jsonl \
+  --output data/wiki/django_repair_wiki.jsonl
+```
+
+When present, `bug_fix_score` and `bug_fix_reasons` are copied into wiki metadata/source context for later analysis.
 
 Run tests inside Docker instead of the host Python environment:
 

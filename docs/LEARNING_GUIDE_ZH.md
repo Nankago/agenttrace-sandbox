@@ -246,6 +246,49 @@ PYTHONPATH=src python3 -m agenttrace_sandbox.cli fetch-github-prs \
 
 公共仓库不一定需要 `GITHUB_TOKEN`，但建议设置，否则容易遇到 GitHub API rate limit。抓取后的 JSONL 可以继续喂给 `build-pr-wiki`。
 
+抓取更高质量的 bug-fix PR：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli fetch-github-prs \
+  --repo django/django \
+  --output data/github/django_bugfix_prs.jsonl \
+  --limit 50 \
+  --state closed \
+  --bug-fix-only \
+  --min-bug-score 2
+```
+
+`GITHUB_TOKEN` 只从环境变量读取，不要写进代码、测试或输出文件。公共仓库可以不设置 token，但有 token 时更不容易被 rate limit。
+
+这个过滤器会综合 PR title、PR body、关联 issue 的 title/body、changed files 和 diff 内容。它会偏向 `fix`、`bug`、`regression`、`error`、`exception`、`crash`、`failing`、`traceback`、`TypeError`、`ValueError` 等信号，同时默认过滤 docs-only、CI/config-only、typo/documentation、refactor/cleanup、test-only PR。需要放宽时，可以加：
+
+```bash
+--include-docs-only
+--include-tests-only
+```
+
+每条 JSONL 会多出这些质量字段：
+
+| 字段 | 含义 |
+|---|---|
+| `is_bug_fix` | 是否通过默认 bug-fix 启发式 |
+| `bug_fix_score` | bug-fix 评分，可配合 `--min-bug-score` 调阈值 |
+| `bug_fix_reasons` | 分数来源和过滤原因 |
+| `source_files` | 被认为是源码的变更文件 |
+| `test_files` | 被认为是测试的变更文件 |
+| `docs_only` | 是否只改文档或 CI/config |
+| `tests_only` | 是否只改测试、不改源码 |
+
+接到 repair wiki：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-pr-wiki \
+  --input data/github/django_bugfix_prs.jsonl \
+  --output data/wiki/django_repair_wiki.jsonl
+```
+
+如果输入里有 `bug_fix_score` / `bug_fix_reasons`，`build-pr-wiki` 会把它们放进 wiki 的 metadata/source_context，后面做分析或二次筛选更方便。
+
 ## 5. 接真实 API 怎么理解
 
 真实 API 模式下，模型不再用固定的 mock 逻辑，而是真的生成工具调用。
