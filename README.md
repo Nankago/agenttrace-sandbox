@@ -50,6 +50,8 @@ This is an independent MVP implementation for learning and extension. It is insp
 - Runs JSONL task manifests for batch trajectory collection.
 - Summarizes run pass rate, failure distribution, average steps, and sandbox backend usage.
 - Exports successful tool calls into JSONL or Alpaca-style SFT data.
+- Builds runnable unit-test benchmark tasks from offline/JSONL records.
+- Builds lightweight PR/Issue repair wiki records from local JSONL.
 
 ## Quick Start
 
@@ -101,6 +103,33 @@ Summarize collected runs:
 
 ```bash
 python -m agenttrace_sandbox.cli stats --runs runs
+```
+
+Build runnable benchmark-style tasks:
+
+```bash
+python -m agenttrace_sandbox.cli build-benchmark \
+  --output-dir data/benchmarks/offline \
+  --limit 5
+```
+
+Validate the generated manifest without calling a model:
+
+```bash
+python -m agenttrace_sandbox.cli run-manifest \
+  --manifest data/benchmarks/offline/tasks.jsonl \
+  --output runs/offline_benchmark_results.jsonl \
+  --dry-run
+```
+
+Remove `--dry-run` when an API model is configured.
+
+Build PR/Issue repair wiki records from local JSONL:
+
+```bash
+python -m agenttrace_sandbox.cli build-pr-wiki \
+  --input examples/pr_issue_pairs.jsonl \
+  --output data/wiki/repair_wiki.jsonl
 ```
 
 Run tests inside Docker instead of the host Python environment:

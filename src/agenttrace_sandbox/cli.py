@@ -4,6 +4,7 @@ import argparse
 from pathlib import Path
 
 from agenttrace_sandbox.config import AgentConfig
+from agenttrace_sandbox.data_builders import build_benchmark_tasks, build_pr_wiki
 from agenttrace_sandbox.llm import MockCodingModel, OpenAICompatibleChat
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
@@ -66,6 +67,15 @@ def main() -> None:
     stats_parser = sub.add_parser("stats", help="Summarize run traces.")
     stats_parser.add_argument("--runs", default=Path("runs"), type=Path)
 
+    benchmark_parser = sub.add_parser("build-benchmark", help="Build runnable unit-test repair tasks.")
+    benchmark_parser.add_argument("--output-dir", default=Path("data/benchmarks/offline"), type=Path)
+    benchmark_parser.add_argument("--limit", type=int, default=5)
+    benchmark_parser.add_argument("--input", type=Path, help="Optional JSONL benchmark records.")
+
+    wiki_parser = sub.add_parser("build-pr-wiki", help="Build repair wiki records from PR/Issue JSONL.")
+    wiki_parser.add_argument("--input", required=True, type=Path)
+    wiki_parser.add_argument("--output", default=Path("data/wiki/repair_wiki.jsonl"), type=Path)
+
     args = parser.parse_args()
     if args.command == "run":
         config = config_from_args(args)
@@ -89,6 +99,10 @@ def main() -> None:
         print(f"wrote {count} samples to {args.output}")
     elif args.command == "stats":
         print(compute_run_stats(args.runs).render())
+    elif args.command == "build-benchmark":
+        print(build_benchmark_tasks(args.output_dir, limit=args.limit, source_path=args.input).render())
+    elif args.command == "build-pr-wiki":
+        print(build_pr_wiki(args.input, args.output).render())
 
 
 if __name__ == "__main__":

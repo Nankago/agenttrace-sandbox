@@ -69,6 +69,8 @@ AgentTrace Sandbox 的核心就是把这些过程系统性记录下来。
 | 格式检测 | 标记模型是否输出了非纯 JSON 的可恢复格式 |
 | SFT 导出 | 支持 JSONL 和 Alpaca 格式 |
 | Stats | 统计通过率、失败分布、平均步数、格式违规率 |
+| Benchmark 构建 | 把带 unit test 的函数任务生成可运行 repo 和 manifest |
+| PR/Issue Wiki | 把 PR/Issue/diff JSONL 转成结构化修复解释数据 |
 
 ## 4. 快速跑通
 
@@ -127,6 +129,30 @@ PYTHONPATH=src python3 -m agenttrace_sandbox.cli export-sft \
 
 ```bash
 PYTHONPATH=src python3 -m agenttrace_sandbox.cli stats --runs runs
+```
+
+构造 benchmark 风格任务：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-benchmark \
+  --output-dir data/benchmarks/offline \
+  --limit 5
+```
+
+这会生成：
+
+```text
+data/benchmarks/offline/tasks.jsonl
+data/benchmarks/offline/repos/<task_id>/solution.py
+data/benchmarks/offline/repos/<task_id>/tests/test_solution.py
+```
+
+构造 PR/Issue Wiki 数据：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-pr-wiki \
+  --input examples/pr_issue_pairs.jsonl \
+  --output data/wiki/repair_wiki.jsonl
 ```
 
 ## 5. 接真实 API 怎么理解
@@ -196,6 +222,7 @@ Docker 模式会使用类似设置：
 | `src/agenttrace_sandbox/sandbox.py` | 沙箱 | local/docker backend 如何跑命令 |
 | `src/agenttrace_sandbox/tracing.py` | trace 写入 | JSONL 事件如何保存 |
 | `src/agenttrace_sandbox/manifest.py` | 批量运行 | JSONL 任务列表如何批量跑 |
+| `src/agenttrace_sandbox/data_builders.py` | 数据构建 | benchmark/PR 记录如何变成任务或 wiki |
 | `src/agenttrace_sandbox/sft_export.py` | SFT 导出 | trace 如何变成训练样本 |
 | `src/agenttrace_sandbox/stats.py` | 统计 | pass rate、format violation 如何统计 |
 | `src/agenttrace_sandbox/llm.py` | 模型接口 | mock 模型和真实 API 如何统一 |
@@ -488,3 +515,114 @@ strict SFT export + quality score
 ```
 
 因为这能直接把“轨迹采集”升级成“高质量后训练数据构建”。
+
+## 17. Benchmark 和 PR 数据如何接入
+
+现在项目开始接入两个上游数据入口：
+
+```text
+benchmark/unit-test 数据 -> 可运行 repair task
+GitHub PR/Issue/diff 数据 -> repair wiki 解释数据
+```
+
+这对应我们之前讨论的两条路线。
+
+### 1. Benchmark 变成可运行任务
+
+Benchmark 数据通常包含：
+
+```text
+函数名
+题目描述
+有 bug 的代码或 skeleton
+单元测试
+```
+
+AgentTrace 会把它写成一个小 repo：
+
+```text
+repos/<task_id>/
+  solution.py
+  tests/test_solution.py
+  AGENT.md
+```
+
+再写入 manifest：
+
+```json
+{
+  "id": "repair_subtract_operator",
+  "repo": "repos/repair_subtract_operator",
+  "task": "Fix subtract so it returns a minus b.",
+  "test_command": "python3 -m unittest discover -s tests"
+}
+```
+
+这样它就能被 `run-manifest` 批量执行。
+
+这条路线更接近：
+
+```text
+Unit Test Guided Repair Synthesis
+```
+
+也就是用测试反馈构造可验证的修复轨迹。
+
+### 2. PR/Issue 变成 Repair Wiki
+
+PR/Issue 数据通常包含：
+
+```text
+issue_title
+issue_body
+pr_title
+pr_body
+diff
+files
+```
+
+AgentTrace 当前的轻量 wiki builder 会生成：
+
+```json
+{
+  "bug_summary": "...",
+  "change_summary": "...",
+  "fix_strategy": "...",
+  "validation": "..."
+}
+```
+
+它不是直接跑 agent，而是生成代码理解/修复解释数据。
+
+这条路线更接近：
+
+```text
+PR/Issue Wiki mid-training-style data
+```
+
+注意：现在只是轻量版数据构建，还不是大规模 mid-training。
+
+### 3. 两条路线如何汇合
+
+后续可以这样汇合：
+
+```text
+Benchmark task
+  -> Agent 执行
+  -> trace
+  -> SFT/DPO
+
+PR/Issue Wiki
+  -> bug summary / root cause / fix strategy
+  -> plan/reasoning 数据
+  -> mid-training-style 代码理解语料
+```
+
+这让项目从“只跑一个 demo”变成：
+
+```text
+上游数据构造
+  -> 安全执行验证
+  -> 轨迹质量分析
+  -> 后训练数据导出
+```

@@ -3,6 +3,7 @@ import json
 from pathlib import Path
 
 from agenttrace_sandbox.config import AgentConfig
+from agenttrace_sandbox.data_builders import build_benchmark_tasks, build_pr_wiki
 from agenttrace_sandbox.llm import MockCodingModel
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
@@ -122,3 +123,50 @@ class RunnerTests(unittest.TestCase):
         self.assertIn("0.5", command)
         self.assertIn("/tmp/workspace:/workspace", command)
         self.assertEqual(command[-3:], ["sh", "-lc", "python3 -m unittest discover -s tests"])
+
+    def test_build_benchmark_tasks(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            summary = build_benchmark_tasks(root / "benchmarks", limit=2)
+            manifest = summary.output_path
+            rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual(summary.count, 2)
+            self.assertEqual(len(rows), 2)
+            repo = manifest.parent / rows[0]["repo"]
+            self.assertTrue((repo / "solution.py").exists())
+            self.assertTrue((repo / "tests" / "test_solution.py").exists())
+
+            dry_run_summary = run_manifest(manifest, AgentConfig(runs_dir=root / "runs"), MockCodingModel(), root / "results.jsonl", dry_run=True)
+            self.assertEqual(dry_run_summary.total, 2)
+            self.assertEqual(dry_run_summary.skipped, 2)
+
+    def test_build_pr_wiki(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "prs.jsonl"
+            source.write_text(
+                json.dumps(
+                    {
+                        "id": "sample_pr",
+                        "repo": "owner/repo",
+                        "issue_title": "subtract is wrong",
+                        "issue_body": "subtract returns the sum.",
+                        "pr_title": "Fix subtract",
+                        "diff": "diff --git a/calculator.py b/calculator.py\n--- a/calculator.py\n+++ b/calculator.py\n@@\n-return a + b\n+return a - b",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output = root / "wiki.jsonl"
+            summary = build_pr_wiki(source, output)
+            row = json.loads(output.read_text(encoding="utf-8"))
+
+            self.assertEqual(summary.count, 1)
+            self.assertEqual(row["files"], ["calculator.py"])
+            self.assertIn("bug_summary", row["wiki"])
