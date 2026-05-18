@@ -52,6 +52,8 @@ This is an independent MVP implementation for learning and extension. It is insp
 - Exports successful tool calls into JSONL or Alpaca-style SFT data.
 - Builds runnable unit-test benchmark tasks from offline/JSONL records.
 - Builds MBPP and HumanEval-style benchmark tasks into runnable repos and manifests.
+- Builds unit-test-driven function completion tasks from existing Python repos.
+- Fetches GitHub PR/Issue/diff records into local JSONL.
 - Builds lightweight PR/Issue repair wiki records from local JSONL.
 
 ## Quick Start
@@ -158,6 +160,17 @@ HumanEval: openai-mirror/openai_humaneval
 
 You can override them with `--modelscope-dataset`. Without optional dependencies or network access, the builders fall back to tiny built-in seed tasks so the pipeline still runs end to end.
 
+Build unit-test-driven completion tasks from an existing Python repo:
+
+```bash
+python -m agenttrace_sandbox.cli build-unit-completion \
+  --repo examples/buggy_calculator \
+  --output-dir data/benchmarks/unit_completion \
+  --limit 20
+```
+
+This scans `tests/test*.py` for imports such as `from calculator import subtract`, copies the repo, blanks the imported function body, and writes a runnable `tasks.jsonl`.
+
 Validate the generated manifest without calling a model:
 
 ```bash
@@ -215,6 +228,20 @@ python -m agenttrace_sandbox.cli build-pr-wiki \
   --input examples/pr_issue_pairs.jsonl \
   --output data/wiki/repair_wiki.jsonl
 ```
+
+Fetch GitHub PR/Issue/diff records first:
+
+```bash
+export GITHUB_TOKEN=ghp_...
+
+python -m agenttrace_sandbox.cli fetch-github-prs \
+  --repo owner/name \
+  --output data/github/pr_issue_pairs.jsonl \
+  --limit 20 \
+  --state closed
+```
+
+Then pass that output to `build-pr-wiki`. `GITHUB_TOKEN` is optional for public repos but recommended for rate limits.
 
 Run tests inside Docker instead of the host Python environment:
 

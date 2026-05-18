@@ -4,7 +4,14 @@ import argparse
 from pathlib import Path
 
 from agenttrace_sandbox.config import AgentConfig
-from agenttrace_sandbox.data_builders import build_benchmark_tasks, build_humaneval_tasks, build_mbpp_tasks, build_pr_wiki
+from agenttrace_sandbox.data_builders import (
+    build_benchmark_tasks,
+    build_humaneval_tasks,
+    build_mbpp_tasks,
+    build_pr_wiki,
+    build_unit_completion_tasks,
+    fetch_github_prs,
+)
 from agenttrace_sandbox.llm import MockCodingModel, OpenAICompatibleChat
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
@@ -76,6 +83,13 @@ def main() -> None:
     benchmark_parser.add_argument("--limit", type=int, default=5)
     benchmark_parser.add_argument("--input", type=Path, help="Optional JSONL benchmark records.")
 
+    unit_parser = sub.add_parser("build-unit-completion", help="Build function-completion tasks by blanking functions imported by tests.")
+    unit_parser.add_argument("--repo", required=True, type=Path)
+    unit_parser.add_argument("--output-dir", default=Path("data/benchmarks/unit_completion"), type=Path)
+    unit_parser.add_argument("--limit", type=int, default=20)
+    unit_parser.add_argument("--tests-dir", default="tests")
+    unit_parser.add_argument("--test-command", default="python3 -m unittest discover -s tests")
+
     mbpp_parser = sub.add_parser("build-mbpp", help="Build runnable MBPP-style function implementation tasks.")
     mbpp_parser.add_argument("--output-dir", default=Path("data/benchmarks/mbpp"), type=Path)
     mbpp_parser.add_argument("--limit", type=int, default=20)
@@ -95,6 +109,12 @@ def main() -> None:
     wiki_parser = sub.add_parser("build-pr-wiki", help="Build repair wiki records from PR/Issue JSONL.")
     wiki_parser.add_argument("--input", required=True, type=Path)
     wiki_parser.add_argument("--output", default=Path("data/wiki/repair_wiki.jsonl"), type=Path)
+
+    github_parser = sub.add_parser("fetch-github-prs", help="Fetch GitHub PR/Issue/diff records into local JSONL.")
+    github_parser.add_argument("--repo", required=True, help="Repository in owner/name form.")
+    github_parser.add_argument("--output", default=Path("data/github/pr_issue_pairs.jsonl"), type=Path)
+    github_parser.add_argument("--limit", type=int, default=20)
+    github_parser.add_argument("--state", choices=["open", "closed", "all"], default="closed")
 
     args = parser.parse_args()
     if args.command == "run":
@@ -131,6 +151,16 @@ def main() -> None:
             print(compute_run_stats(args.runs).render())
     elif args.command == "build-benchmark":
         print(build_benchmark_tasks(args.output_dir, limit=args.limit, source_path=args.input).render())
+    elif args.command == "build-unit-completion":
+        print(
+            build_unit_completion_tasks(
+                args.repo,
+                args.output_dir,
+                limit=args.limit,
+                tests_dir=args.tests_dir,
+                test_command=args.test_command,
+            ).render()
+        )
     elif args.command == "build-mbpp":
         print(
             build_mbpp_tasks(
@@ -155,6 +185,8 @@ def main() -> None:
         )
     elif args.command == "build-pr-wiki":
         print(build_pr_wiki(args.input, args.output).render())
+    elif args.command == "fetch-github-prs":
+        print(fetch_github_prs(args.repo, args.output, limit=args.limit, state=args.state).render())
 
 
 if __name__ == "__main__":

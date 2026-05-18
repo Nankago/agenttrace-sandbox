@@ -71,6 +71,8 @@ AgentTrace Sandbox 的核心就是把这些过程系统性记录下来。
 | Stats | 统计通过率、失败分布、平均步数、格式违规率 |
 | Benchmark 构建 | 把带 unit test 的函数任务生成可运行 repo 和 manifest |
 | MBPP/HumanEval 构建 | 把公开代码 benchmark 转成可执行的函数补全任务 |
+| Unit Test 补全构建 | 从已有 Python repo 的测试 import 中挖空函数，生成补全任务 |
+| GitHub 自动抓取 | 从 GitHub repo 抓取 PR、关联 issue 和 diff |
 | PR/Issue Wiki | 把 PR/Issue/diff JSONL 转成结构化修复解释数据 |
 
 ## 4. 快速跑通
@@ -201,6 +203,27 @@ data/benchmarks/<name>/repos/<task_id>/tests/test_solution.py
 
 其中 `tasks.jsonl` 是 agent 要处理的任务列表，`repos/<task_id>` 是每个任务对应的独立小代码仓库。
 
+从已有 Python repo 构造 Unit Test 函数补全任务：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-unit-completion \
+  --repo examples/buggy_calculator \
+  --output-dir data/benchmarks/unit_completion \
+  --limit 20
+```
+
+它会扫描 `tests/test*.py` 里的 import，例如：
+
+```python
+from calculator import subtract
+```
+
+然后复制整个 repo，把 `calculator.py` 里的 `subtract` 函数体挖空成 `pass`，再生成 manifest。这样得到的任务就是：
+
+```text
+给 agent 一个真实测试约束，让它补全函数，使原有单测通过。
+```
+
 构造 PR/Issue Wiki 数据：
 
 ```bash
@@ -208,6 +231,20 @@ PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-pr-wiki \
   --input examples/pr_issue_pairs.jsonl \
   --output data/wiki/repair_wiki.jsonl
 ```
+
+从 GitHub 自动抓取 PR/Issue/diff：
+
+```bash
+export GITHUB_TOKEN="your_github_token"
+
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli fetch-github-prs \
+  --repo owner/name \
+  --output data/github/pr_issue_pairs.jsonl \
+  --limit 20 \
+  --state closed
+```
+
+公共仓库不一定需要 `GITHUB_TOKEN`，但建议设置，否则容易遇到 GitHub API rate limit。抓取后的 JSONL 可以继续喂给 `build-pr-wiki`。
 
 ## 5. 接真实 API 怎么理解
 

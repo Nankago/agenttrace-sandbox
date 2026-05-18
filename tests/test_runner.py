@@ -8,6 +8,8 @@ from agenttrace_sandbox.data_builders import (
     build_humaneval_tasks,
     build_mbpp_tasks,
     build_pr_wiki,
+    build_unit_completion_tasks,
+    linked_issue_number,
     load_dataset_rows,
     rows_from_loaded_dataset,
 )
@@ -188,6 +190,41 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(dry_run_summary.total, 1)
             self.assertEqual(dry_run_summary.skipped, 1)
 
+    def test_build_unit_completion_tasks(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            (repo / "tests").mkdir(parents=True)
+            (repo / "math_utils.py").write_text(
+                "def add(a, b):\n"
+                "    return a + b\n\n"
+                "def hidden(a, b):\n"
+                "    return a * b\n",
+                encoding="utf-8",
+            )
+            (repo / "tests" / "test_math_utils.py").write_text(
+                "import unittest\n\n"
+                "from math_utils import add\n\n"
+                "class MathTests(unittest.TestCase):\n"
+                "    def test_add(self):\n"
+                "        self.assertEqual(add(2, 3), 5)\n",
+                encoding="utf-8",
+            )
+
+            summary = build_unit_completion_tasks(repo, root / "unit_tasks", limit=5)
+            rows = [json.loads(line) for line in summary.output_path.read_text(encoding="utf-8").splitlines()]
+            task_repo = summary.output_path.parent / rows[0]["repo"]
+
+            self.assertEqual(summary.count, 1)
+            self.assertEqual(rows[0]["source"], "unit_completion")
+            self.assertIn("pass", (task_repo / "math_utils.py").read_text(encoding="utf-8"))
+
+            dry_run_summary = run_manifest(summary.output_path, AgentConfig(runs_dir=root / "runs"), MockCodingModel(), root / "results.jsonl", dry_run=True)
+            self.assertEqual(dry_run_summary.total, 1)
+            self.assertEqual(dry_run_summary.skipped, 1)
+
     def test_dataset_loader_offline_and_split_dict(self) -> None:
         rows = load_dataset_rows("unused", "test", [{"id": 1}], dataset_source="offline")
         self.assertEqual(rows, [{"id": 1}])
@@ -222,6 +259,10 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(summary.count, 1)
             self.assertEqual(row["files"], ["calculator.py"])
             self.assertIn("bug_summary", row["wiki"])
+
+    def test_linked_issue_number(self) -> None:
+        self.assertEqual(linked_issue_number("Fixes #123 and updates docs"), 123)
+        self.assertEqual(linked_issue_number("No linked issue"), None)
 
     def test_strict_sft_export_filters_noisy_traces(self) -> None:
         import tempfile

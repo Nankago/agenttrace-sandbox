@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
+import shutil
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -116,6 +118,7 @@ HF_HUMANEVAL_DATASET = "openai/openai_humaneval"
 MODELSCOPE_MBPP_DATASET = "OmniData/MBPP"
 MODELSCOPE_HUMANEVAL_DATASET = "openai-mirror/openai_humaneval"
 DATASET_SOURCES = {"auto", "modelscope", "huggingface", "offline"}
+GITHUB_API = "https://api.github.com"
 
 
 def build_benchmark_tasks(output_dir: Path, limit: int = 5, source_path: Path | None = None) -> BuildSummary:
@@ -261,6 +264,83 @@ def build_humaneval_tasks(
     return BuildSummary(count=count, output_path=manifest_path, extra_path=repo_root)
 
 
+def build_unit_completion_tasks(
+    source_repo: Path,
+    output_dir: Path,
+    limit: int = 20,
+    tests_dir: str = "tests",
+    test_command: str = "python3 -m unittest discover -s tests",
+) -> BuildSummary:
+    targets = discover_unit_completion_targets(source_repo, tests_dir=tests_dir)[:limit]
+    repo_root = output_dir / "repos"
+    manifest_path = output_dir / "tasks.jsonl"
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    repo_root.mkdir(parents=True, exist_ok=True)
+
+    with manifest_path.open("w", encoding="utf-8") as manifest:
+        for target in targets:
+            task_id = safe_id(f"unit_{target['module']}_{target['function']}")
+            repo_path = repo_root / task_id
+            if repo_path.exists():
+                shutil.rmtree(repo_path)
+            shutil.copytree(source_repo, repo_path, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "runs", "data"))
+            blank_function_body(repo_path / target["path"], target["function"])
+            manifest.write(
+                json.dumps(
+                    {
+                        "id": task_id,
+                        "source": "unit_completion",
+                        "repo": f"repos/{task_id}",
+                        "task": f"Complete `{target['function']}` in `{target['path']}` so the existing unit tests pass.",
+                        "target_file": target["path"],
+                        "target_symbol": target["function"],
+                        "test_command": test_command,
+                    },
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+
+    return BuildSummary(count=len(targets), output_path=manifest_path, extra_path=repo_root)
+
+
+def fetch_github_prs(repo_full_name: str, output_path: Path, limit: int = 20, state: str = "closed") -> BuildSummary:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    pulls = github_api_json(f"/repos/{repo_full_name}/pulls", {"state": state, "per_page": str(min(limit, 100)), "sort": "updated", "direction": "desc"})
+    if not isinstance(pulls, list):
+        pulls = []
+
+    count = 0
+    with output_path.open("w", encoding="utf-8") as out:
+        for pr in pulls[:limit]:
+            if not isinstance(pr, dict):
+                continue
+            number = int(pr.get("number") or 0)
+            if not number:
+                continue
+            body = str(pr.get("body") or "")
+            issue_number = linked_issue_number(body)
+            issue = github_api_json(f"/repos/{repo_full_name}/issues/{issue_number}") if issue_number else {}
+            diff = github_api_text(f"/repos/{repo_full_name}/pulls/{number}", accept="application/vnd.github.v3.diff")
+            record = {
+                "id": f"{repo_full_name}#{number}",
+                "repo": repo_full_name,
+                "pr_number": number,
+                "pr_title": pr.get("title", ""),
+                "pr_body": body,
+                "pr_url": pr.get("html_url", ""),
+                "issue_number": issue_number,
+                "issue_title": issue.get("title", "") if isinstance(issue, dict) else "",
+                "issue_body": issue.get("body", "") if isinstance(issue, dict) else "",
+                "diff": diff,
+                "files": files_from_diff(diff),
+            }
+            out.write(json.dumps(record, ensure_ascii=False) + "\n")
+            count += 1
+
+    return BuildSummary(count=count, output_path=output_path)
+
+
 def normalize_benchmark_record(raw: dict[str, Any]) -> dict[str, Any]:
     required = ["id", "function", "description", "buggy_code", "tests"]
     missing = [key for key in required if key not in raw]
@@ -312,6 +392,88 @@ def write_humaneval_repo(repo_path: Path, prompt: str, entry_point: str, test: s
     (repo_path / "tests").mkdir(exist_ok=True)
     (repo_path / "tests" / "test_solution.py").write_text(test_content, encoding="utf-8")
     (repo_path / "AGENT.md").write_text("Implement the target function. Run tests after editing.\n", encoding="utf-8")
+
+
+def discover_unit_completion_targets(source_repo: Path, tests_dir: str = "tests") -> list[dict[str, str]]:
+    imported = imported_functions_from_tests(source_repo / tests_dir)
+    targets: list[dict[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for module, functions in sorted(imported.items()):
+        module_path = resolve_module_path(source_repo, module)
+        if not module_path:
+            continue
+        available = top_level_function_names(module_path)
+        for function in sorted(functions):
+            key = (str(module_path.relative_to(source_repo)), function)
+            if function in available and key not in seen:
+                seen.add(key)
+                targets.append({"module": module, "function": function, "path": str(module_path.relative_to(source_repo))})
+    return targets
+
+
+def imported_functions_from_tests(tests_path: Path) -> dict[str, set[str]]:
+    imported: dict[str, set[str]] = {}
+    if not tests_path.exists():
+        return imported
+    for path in sorted(tests_path.rglob("test*.py")):
+        try:
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+                names = {alias.name for alias in node.names if alias.name != "*"}
+                if names:
+                    imported.setdefault(node.module, set()).update(names)
+    return imported
+
+
+def resolve_module_path(source_repo: Path, module: str) -> Path | None:
+    relative = Path(*module.split("."))
+    candidates = [source_repo / relative.with_suffix(".py"), source_repo / "src" / relative.with_suffix(".py")]
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def top_level_function_names(path: Path) -> set[str]:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return set()
+    return {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
+
+
+def blank_function_body(path: Path, function_name: str) -> None:
+    lines = path.read_text(encoding="utf-8").splitlines()
+    tree = ast.parse("\n".join(lines) + "\n")
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
+            body = list(node.body)
+            if body and is_docstring_node(body[0]):
+                if len(body) == 1:
+                    indent = " " * (body[0].col_offset + 4)
+                    insert_at = body[0].end_lineno or body[0].lineno
+                    lines.insert(insert_at, f"{indent}pass")
+                else:
+                    replace_body_lines(lines, body[1], body[-1], "pass")
+            elif body:
+                replace_body_lines(lines, body[0], body[-1], "pass")
+            path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+            return
+    raise ValueError(f"function not found: {function_name}")
+
+
+def is_docstring_node(node: ast.AST) -> bool:
+    return isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+
+
+def replace_body_lines(lines: list[str], first: ast.AST, last: ast.AST, replacement: str) -> None:
+    start = first.lineno - 1
+    end = (last.end_lineno or last.lineno)
+    indent = " " * first.col_offset
+    lines[start:end] = [f"{indent}{replacement}"]
 
 
 def load_dataset_rows(
@@ -445,6 +607,36 @@ def build_pr_wiki(input_path: Path, output_path: Path) -> BuildSummary:
             out.write(json.dumps(wiki, ensure_ascii=False) + "\n")
             count += 1
     return BuildSummary(count=count, output_path=output_path)
+
+
+def github_api_json(path: str, params: dict[str, str] | None = None) -> Any:
+    text = github_api_text(path, params=params, accept="application/vnd.github+json")
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return {}
+
+
+def github_api_text(path: str, params: dict[str, str] | None = None, accept: str = "application/vnd.github+json") -> str:
+    query = f"?{urllib.parse.urlencode(params)}" if params else ""
+    request = urllib.request.Request(f"{GITHUB_API}{path}{query}")
+    request.add_header("Accept", accept)
+    request.add_header("User-Agent", "agenttrace-sandbox")
+    token = os.getenv("GITHUB_TOKEN") or os.getenv("GH_TOKEN")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            return response.read().decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def linked_issue_number(text: str) -> int | None:
+    match = re.search(r"\b(?:fixes|fixed|close[sd]?|resolve[sd]?)\s+#(\d+)", text, flags=re.IGNORECASE)
+    return int(match.group(1)) if match else None
 
 
 def make_pr_wiki(record: dict[str, Any]) -> dict[str, Any]:
