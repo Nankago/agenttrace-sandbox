@@ -3,7 +3,7 @@ import json
 from pathlib import Path
 
 from agenttrace_sandbox.config import AgentConfig
-from agenttrace_sandbox.data_builders import build_benchmark_tasks, build_pr_wiki
+from agenttrace_sandbox.data_builders import build_benchmark_tasks, build_humaneval_tasks, build_mbpp_tasks, build_pr_wiki
 from agenttrace_sandbox.llm import MockCodingModel
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
@@ -142,6 +142,44 @@ class RunnerTests(unittest.TestCase):
             dry_run_summary = run_manifest(manifest, AgentConfig(runs_dir=root / "runs"), MockCodingModel(), root / "results.jsonl", dry_run=True)
             self.assertEqual(dry_run_summary.total, 2)
             self.assertEqual(dry_run_summary.skipped, 2)
+
+    def test_build_mbpp_tasks(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            summary = build_mbpp_tasks(root / "mbpp", limit=1)
+            manifest = summary.output_path
+            rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual(summary.count, 1)
+            self.assertEqual(rows[0]["source"], "mbpp")
+            repo = manifest.parent / rows[0]["repo"]
+            self.assertIn("pass", (repo / "solution.py").read_text(encoding="utf-8"))
+            self.assertIn("assert", (repo / "tests" / "test_solution.py").read_text(encoding="utf-8"))
+
+            dry_run_summary = run_manifest(manifest, AgentConfig(runs_dir=root / "runs"), MockCodingModel(), root / "results.jsonl", dry_run=True)
+            self.assertEqual(dry_run_summary.total, 1)
+            self.assertEqual(dry_run_summary.skipped, 1)
+
+    def test_build_humaneval_tasks(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            summary = build_humaneval_tasks(root / "humaneval", limit=1)
+            manifest = summary.output_path
+            rows = [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual(summary.count, 1)
+            self.assertEqual(rows[0]["source"], "humaneval")
+            repo = manifest.parent / rows[0]["repo"]
+            self.assertIn("pass", (repo / "solution.py").read_text(encoding="utf-8"))
+            self.assertIn("check(", (repo / "tests" / "test_solution.py").read_text(encoding="utf-8"))
+
+            dry_run_summary = run_manifest(manifest, AgentConfig(runs_dir=root / "runs"), MockCodingModel(), root / "results.jsonl", dry_run=True)
+            self.assertEqual(dry_run_summary.total, 1)
+            self.assertEqual(dry_run_summary.skipped, 1)
 
     def test_build_pr_wiki(self) -> None:
         import tempfile

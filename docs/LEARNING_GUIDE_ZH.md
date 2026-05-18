@@ -70,6 +70,7 @@ AgentTrace Sandbox 的核心就是把这些过程系统性记录下来。
 | SFT 导出 | 支持 JSONL 和 Alpaca 格式 |
 | Stats | 统计通过率、失败分布、平均步数、格式违规率 |
 | Benchmark 构建 | 把带 unit test 的函数任务生成可运行 repo 和 manifest |
+| MBPP/HumanEval 构建 | 把公开代码 benchmark 转成可执行的函数补全任务 |
 | PR/Issue Wiki | 把 PR/Issue/diff JSONL 转成结构化修复解释数据 |
 
 ## 4. 快速跑通
@@ -139,13 +140,39 @@ PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-benchmark \
   --limit 5
 ```
 
+构造 MBPP 任务：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-mbpp \
+  --output-dir data/benchmarks/mbpp \
+  --limit 20
+```
+
+构造 HumanEval 任务：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-humaneval \
+  --output-dir data/benchmarks/humaneval \
+  --limit 20
+```
+
+这两个命令会优先尝试读取公开 benchmark 数据集。如果本机没有 `datasets` 包，或者服务器不能联网，就会自动退回到内置的小样例，所以你仍然可以完整跑通 pipeline。
+
+如果你想拉取公开数据集，可以安装可选依赖：
+
+```bash
+pip install -e ".[benchmarks]"
+```
+
 这会生成：
 
 ```text
-data/benchmarks/offline/tasks.jsonl
-data/benchmarks/offline/repos/<task_id>/solution.py
-data/benchmarks/offline/repos/<task_id>/tests/test_solution.py
+data/benchmarks/<name>/tasks.jsonl
+data/benchmarks/<name>/repos/<task_id>/solution.py
+data/benchmarks/<name>/repos/<task_id>/tests/test_solution.py
 ```
+
+其中 `tasks.jsonl` 是 agent 要处理的任务列表，`repos/<task_id>` 是每个任务对应的独立小代码仓库。
 
 构造 PR/Issue Wiki 数据：
 
@@ -226,6 +253,21 @@ Docker 模式会使用类似设置：
 | `src/agenttrace_sandbox/sft_export.py` | SFT 导出 | trace 如何变成训练样本 |
 | `src/agenttrace_sandbox/stats.py` | 统计 | pass rate、format violation 如何统计 |
 | `src/agenttrace_sandbox/llm.py` | 模型接口 | mock 模型和真实 API 如何统一 |
+
+## 7.1 Benchmark-to-SFT 闭环
+
+现在项目里 benchmark 到 SFT 的完整链路是：
+
+```text
+MBPP/HumanEval 原始题目
+  -> build-mbpp / build-humaneval
+  -> 生成可运行 repo + tasks.jsonl
+  -> run-manifest 调用真实 API 或 mock agent
+  -> 生成 runs/<run_id>/trace.jsonl
+  -> export-sft 导出训练样本
+```
+
+通俗地说，benchmark builder 做的是“把题目变成 agent 能操作的代码仓库”；runner 做的是“让模型真的在仓库里读文件、改代码、跑测试”；SFT exporter 做的是“把成功过程拆成下一步工具调用训练样本”。
 
 ## 8. Agent 主循环详解
 

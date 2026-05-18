@@ -51,6 +51,7 @@ This is an independent MVP implementation for learning and extension. It is insp
 - Summarizes run pass rate, failure distribution, average steps, and sandbox backend usage.
 - Exports successful tool calls into JSONL or Alpaca-style SFT data.
 - Builds runnable unit-test benchmark tasks from offline/JSONL records.
+- Builds MBPP and HumanEval-style benchmark tasks into runnable repos and manifests.
 - Builds lightweight PR/Issue repair wiki records from local JSONL.
 
 ## Quick Start
@@ -113,16 +114,46 @@ python -m agenttrace_sandbox.cli build-benchmark \
   --limit 5
 ```
 
+Build MBPP-style function tasks:
+
+```bash
+python -m agenttrace_sandbox.cli build-mbpp \
+  --output-dir data/benchmarks/mbpp \
+  --limit 20
+```
+
+Build HumanEval-style function tasks:
+
+```bash
+python -m agenttrace_sandbox.cli build-humaneval \
+  --output-dir data/benchmarks/humaneval \
+  --limit 20
+```
+
+If the optional `datasets` package is installed, these commands try to load the public benchmark split. Without that dependency or network access, they fall back to tiny built-in seed tasks so the pipeline still runs end to end.
+
+```bash
+pip install -e ".[benchmarks]"
+```
+
 Validate the generated manifest without calling a model:
 
 ```bash
 python -m agenttrace_sandbox.cli run-manifest \
-  --manifest data/benchmarks/offline/tasks.jsonl \
-  --output runs/offline_benchmark_results.jsonl \
+  --manifest data/benchmarks/mbpp/tasks.jsonl \
+  --output runs/mbpp_results.jsonl \
   --dry-run
 ```
 
 Remove `--dry-run` when an API model is configured.
+
+Export successful benchmark traces to SFT:
+
+```bash
+python -m agenttrace_sandbox.cli export-sft \
+  --traces runs \
+  --output data/sft/benchmark_tool_calls.jsonl
+```
 
 Build PR/Issue repair wiki records from local JSONL:
 

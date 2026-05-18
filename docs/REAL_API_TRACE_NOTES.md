@@ -11,10 +11,11 @@ No API keys, tokens, or private endpoint secrets are recorded here.
 - Task: fix the `subtract` bug in `examples/buggy_calculator`
 - Test command: `python3 -m unittest discover -s tests`
 - Sandbox backend during these runs: `local`
-- Number of real API runs inspected: 7 total
+- Number of real API runs inspected: 8 total
   - 1 initial smoke test
   - 5 repeated runs before prompt tightening
   - 1 smoke test after prompt tightening
+  - 1 MBPP-style benchmark-to-SFT smoke test
 
 ## What Worked
 
@@ -39,6 +40,17 @@ real model output
   -> trace recording
   -> SFT-ready data export
 ```
+
+The MBPP-style benchmark smoke test also completed successfully:
+
+```text
+build-mbpp
+  -> run-manifest with deepseek-chat
+  -> trace.jsonl
+  -> export-sft
+```
+
+That run produced 1 successful trace and 3 SFT tool-call samples, covering `read_file`, `replace_in_file`, and `run_tests`.
 
 ## Issues Observed
 

@@ -5,6 +5,9 @@ description = "A safe trajectory collection MVP for coding-agent post-training."
 requires-python = ">=3.10"
 dependencies = []
 
+[project.optional-dependencies]
+benchmarks = ["datasets>=2.18.0"]
+
 [project.scripts]
 agenttrace = "agenttrace_sandbox.cli:main"
 

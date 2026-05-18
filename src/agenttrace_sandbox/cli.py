@@ -4,7 +4,7 @@ import argparse
 from pathlib import Path
 
 from agenttrace_sandbox.config import AgentConfig
-from agenttrace_sandbox.data_builders import build_benchmark_tasks, build_pr_wiki
+from agenttrace_sandbox.data_builders import build_benchmark_tasks, build_humaneval_tasks, build_mbpp_tasks, build_pr_wiki
 from agenttrace_sandbox.llm import MockCodingModel, OpenAICompatibleChat
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
@@ -72,6 +72,18 @@ def main() -> None:
     benchmark_parser.add_argument("--limit", type=int, default=5)
     benchmark_parser.add_argument("--input", type=Path, help="Optional JSONL benchmark records.")
 
+    mbpp_parser = sub.add_parser("build-mbpp", help="Build runnable MBPP-style function implementation tasks.")
+    mbpp_parser.add_argument("--output-dir", default=Path("data/benchmarks/mbpp"), type=Path)
+    mbpp_parser.add_argument("--limit", type=int, default=20)
+    mbpp_parser.add_argument("--split", default="test")
+    mbpp_parser.add_argument("--input", type=Path, help="Optional local MBPP JSONL records.")
+
+    humaneval_parser = sub.add_parser("build-humaneval", help="Build runnable HumanEval-style function implementation tasks.")
+    humaneval_parser.add_argument("--output-dir", default=Path("data/benchmarks/humaneval"), type=Path)
+    humaneval_parser.add_argument("--limit", type=int, default=20)
+    humaneval_parser.add_argument("--split", default="test")
+    humaneval_parser.add_argument("--input", type=Path, help="Optional local HumanEval JSONL records.")
+
     wiki_parser = sub.add_parser("build-pr-wiki", help="Build repair wiki records from PR/Issue JSONL.")
     wiki_parser.add_argument("--input", required=True, type=Path)
     wiki_parser.add_argument("--output", default=Path("data/wiki/repair_wiki.jsonl"), type=Path)
@@ -101,6 +113,10 @@ def main() -> None:
         print(compute_run_stats(args.runs).render())
     elif args.command == "build-benchmark":
         print(build_benchmark_tasks(args.output_dir, limit=args.limit, source_path=args.input).render())
+    elif args.command == "build-mbpp":
+        print(build_mbpp_tasks(args.output_dir, limit=args.limit, split=args.split, source_path=args.input).render())
+    elif args.command == "build-humaneval":
+        print(build_humaneval_tasks(args.output_dir, limit=args.limit, split=args.split, source_path=args.input).render())
     elif args.command == "build-pr-wiki":
         print(build_pr_wiki(args.input, args.output).render())
 
