@@ -89,6 +89,10 @@ def main() -> None:
     unit_parser.add_argument("--limit", type=int, default=20)
     unit_parser.add_argument("--tests-dir", default="tests")
     unit_parser.add_argument("--test-command", default="python3 -m unittest discover -s tests")
+    unit_parser.add_argument("--min-confidence", type=float, default=0.5)
+    unit_parser.add_argument("--include-methods", action="store_true")
+    unit_parser.add_argument("--exclude-private", action=argparse.BooleanOptionalAction, default=True)
+    unit_parser.add_argument("--max-per-file", type=int, default=5)
 
     mbpp_parser = sub.add_parser("build-mbpp", help="Build runnable MBPP-style function implementation tasks.")
     mbpp_parser.add_argument("--output-dir", default=Path("data/benchmarks/mbpp"), type=Path)
@@ -163,6 +167,10 @@ def main() -> None:
                 limit=args.limit,
                 tests_dir=args.tests_dir,
                 test_command=args.test_command,
+                min_confidence=args.min_confidence,
+                include_methods=args.include_methods,
+                exclude_private=args.exclude_private,
+                max_per_file=args.max_per_file,
             ).render()
         )
     elif args.command == "build-mbpp":

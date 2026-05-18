@@ -10,6 +10,7 @@ from agenttrace_sandbox.data_builders import (
     build_pr_wiki,
     build_unit_completion_tasks,
     bug_fix_quality,
+    discover_test_function_refs,
     is_bug_fix_record,
     linked_issue_number,
     load_dataset_rows,
@@ -226,6 +227,179 @@ class RunnerTests(unittest.TestCase):
             dry_run_summary = run_manifest(summary.output_path, AgentConfig(runs_dir=root / "runs"), MockCodingModel(), root / "results.jsonl", dry_run=True)
             self.assertEqual(dry_run_summary.total, 1)
             self.assertEqual(dry_run_summary.skipped, 1)
+
+    def test_discover_test_function_refs_import_patterns(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            tests = root / "tests"
+            tests.mkdir()
+            (tests / "test_refs.py").write_text(
+                "from math_utils import add\n"
+                "from math_utils import subtract as minus\n"
+                "from pkg import math_utils\n"
+                "import string_utils\n"
+                "import number_utils as nums\n\n"
+                "import pkg.strings as strings\n\n"
+                "def test_calls():\n"
+                "    add(1, 2)\n"
+                "    minus(3, 1)\n"
+                "    math_utils.multiply(2, 4)\n"
+                "    string_utils.slugify('Hello')\n"
+                "    nums.double(2)\n"
+                "    strings.clean('Hello')\n",
+                encoding="utf-8",
+            )
+
+            refs = {(ref["module"], ref["function"], ref["access_path"]) for ref in discover_test_function_refs(tests)}
+
+            self.assertIn(("math_utils", "add", "add"), refs)
+            self.assertIn(("math_utils", "subtract", "minus"), refs)
+            self.assertIn(("pkg.math_utils", "multiply", "math_utils.multiply"), refs)
+            self.assertIn(("string_utils", "slugify", "string_utils.slugify"), refs)
+            self.assertIn(("number_utils", "double", "nums.double"), refs)
+            self.assertIn(("pkg.strings", "clean", "strings.clean"), refs)
+
+    def test_build_unit_completion_import_call_patterns_and_docstring(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            (repo / "tests").mkdir(parents=True)
+            (repo / "math_utils.py").write_text(
+                "def add(a, b):\n"
+                "    \"\"\"Add two numbers.\"\"\"\n"
+                "    return a + b\n\n"
+                "def subtract(a, b):\n"
+                "    return a - b\n\n"
+                "def multiply(a, b):\n"
+                "    return a * b\n\n"
+                "def divide(a, b):\n"
+                "    return a / b\n\n",
+                encoding="utf-8",
+            )
+            (repo / "tests" / "test_math_utils.py").write_text(
+                "from math_utils import add\n"
+                "from math_utils import subtract as minus\n"
+                "import math_utils\n"
+                "import math_utils as mu\n\n"
+                "def test_math():\n"
+                "    add(1, 2)\n"
+                "    minus(3, 1)\n"
+                "    math_utils.multiply(2, 3)\n"
+                "    mu.divide(4, 2)\n",
+                encoding="utf-8",
+            )
+
+            summary = build_unit_completion_tasks(repo, root / "unit_tasks", limit=10)
+            rows = [json.loads(line) for line in summary.output_path.read_text(encoding="utf-8").splitlines()]
+            symbols = {row["target_symbol"] for row in rows}
+            add_row = next(row for row in rows if row["target_symbol"] == "add")
+            add_repo = summary.output_path.parent / add_row["repo"]
+            add_source = (add_repo / "math_utils.py").read_text(encoding="utf-8")
+
+            self.assertEqual(summary.count, 4)
+            self.assertEqual(symbols, {"add", "subtract", "multiply", "divide"})
+            self.assertEqual(add_row["original_module"], "math_utils")
+            self.assertIn("test_files", add_row)
+            self.assertIn('"""Add two numbers."""', add_source)
+            self.assertIn("pass", add_source)
+
+    def test_build_unit_completion_from_package_import_and_src_layout(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            (repo / "src" / "pkg").mkdir(parents=True)
+            (repo / "tests").mkdir()
+            (repo / "src" / "pkg" / "__init__.py").write_text("", encoding="utf-8")
+            (repo / "src" / "pkg" / "math_utils.py").write_text(
+                "def add(a, b):\n"
+                "    return a + b\n",
+                encoding="utf-8",
+            )
+            (repo / "tests" / "test_pkg.py").write_text(
+                "from pkg import math_utils\n\n"
+                "def test_add():\n"
+                "    math_utils.add(1, 2)\n",
+                encoding="utf-8",
+            )
+
+            summary = build_unit_completion_tasks(repo, root / "unit_tasks", limit=5)
+            rows = [json.loads(line) for line in summary.output_path.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual(summary.count, 1)
+            self.assertEqual(rows[0]["target_file"], "src/pkg/math_utils.py")
+            self.assertEqual(rows[0]["original_import"], "from pkg import math_utils")
+
+    def test_build_unit_completion_private_and_max_per_file(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            (repo / "tests").mkdir(parents=True)
+            (repo / "math_utils.py").write_text(
+                "def _hidden():\n"
+                "    return 1\n\n"
+                "def first():\n"
+                "    return 1\n\n"
+                "def second():\n"
+                "    return 2\n\n",
+                encoding="utf-8",
+            )
+            (repo / "tests" / "test_math_utils.py").write_text(
+                "from math_utils import _hidden, first, second\n\n"
+                "def test_values():\n"
+                "    _hidden()\n"
+                "    first()\n"
+                "    second()\n",
+                encoding="utf-8",
+            )
+
+            summary = build_unit_completion_tasks(repo, root / "unit_tasks", limit=10, max_per_file=1)
+            rows = [json.loads(line) for line in summary.output_path.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual(summary.count, 1)
+            self.assertEqual(rows[0]["target_symbol"], "first")
+            self.assertNotEqual(rows[0]["target_symbol"], "_hidden")
+
+    def test_build_unit_completion_include_class_method(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = root / "repo"
+            (repo / "tests").mkdir(parents=True)
+            (repo / "calculator.py").write_text(
+                "class Calculator:\n"
+                "    @staticmethod\n"
+                "    def add(a, b):\n"
+                "        \"\"\"Add two values.\"\"\"\n"
+                "        return a + b\n",
+                encoding="utf-8",
+            )
+            (repo / "tests" / "test_calculator.py").write_text(
+                "from calculator import Calculator\n\n"
+                "def test_add():\n"
+                "    Calculator.add(1, 2)\n",
+                encoding="utf-8",
+            )
+
+            skipped = build_unit_completion_tasks(repo, root / "skipped", include_methods=False)
+            summary = build_unit_completion_tasks(repo, root / "unit_tasks", include_methods=True)
+            rows = [json.loads(line) for line in summary.output_path.read_text(encoding="utf-8").splitlines()]
+            task_repo = summary.output_path.parent / rows[0]["repo"]
+            source = (task_repo / "calculator.py").read_text(encoding="utf-8")
+
+            self.assertEqual(skipped.count, 0)
+            self.assertEqual(summary.count, 1)
+            self.assertEqual(rows[0]["target_class"], "Calculator")
+            self.assertIn('"""Add two values."""', source)
+            self.assertIn("pass", source)
 
     def test_dataset_loader_offline_and_split_dict(self) -> None:
         rows = load_dataset_rows("unused", "test", [{"id": 1}], dataset_source="offline")

@@ -209,19 +209,78 @@ data/benchmarks/<name>/repos/<task_id>/tests/test_solution.py
 PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-unit-completion \
   --repo examples/buggy_calculator \
   --output-dir data/benchmarks/unit_completion \
-  --limit 20
+  --limit 20 \
+  --min-confidence 0.5 \
+  --max-per-file 5
 ```
 
-它会扫描 `tests/test*.py` 里的 import，例如：
+它会扫描 `tests/test*.py`，先用 AST 确认 import 进来的函数确实被测试调用，再复制 repo、挖空目标函数体并生成 manifest。现在支持这些常见写法：
 
 ```python
 from calculator import subtract
+subtract(3, 1)
+
+import calculator
+calculator.subtract(3, 1)
+
+import calculator as calc
+calc.subtract(3, 1)
+
+from calculator import subtract as minus
+minus(3, 1)
+
+from pkg import math_utils
+math_utils.add(1, 2)
 ```
 
-然后复制整个 repo，把 `calculator.py` 里的 `subtract` 函数体挖空成 `pass`，再生成 manifest。这样得到的任务就是：
+模块定位支持普通文件、`src` layout 和 package layout，例如：
+
+```text
+math_utils.py
+src/pkg/math_utils.py
+pkg/math_utils.py
+pkg/__init__.py
+```
+
+挖空时会保留函数签名、decorator 和 docstring。默认生成 top-level function 任务；如果测试里能直接识别 class/static method，可以用 `--include-methods` 打开方法任务。语法解析失败、目标文件不存在、挖空后不是合法 Python 的目标会被跳过，不会让整个 builder 崩掉。
+
+常用参数：
+
+| 参数 | 说明 |
+|---|---|
+| `--min-confidence` | 只保留置信度不低于阈值的目标，默认 `0.5` |
+| `--include-methods` | 允许生成 class/static method 任务 |
+| `--exclude-private` / `--no-exclude-private` | 默认跳过 `_private` 函数 |
+| `--max-per-file` | 每个源码文件最多生成多少个任务，默认 `5` |
+
+manifest 每行会包含：
+
+```text
+source, target_file, target_symbol, test_files, confidence,
+original_module, original_import, target_class(如果有)
+```
+
+这样得到的任务就是：
 
 ```text
 给 agent 一个真实测试约束，让它补全函数，使原有单测通过。
+```
+
+可以先 dry-run 验证 manifest：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli run-manifest \
+  --manifest data/benchmarks/unit_completion/tasks.jsonl \
+  --output runs/unit_completion_results.jsonl \
+  --dry-run
+```
+
+真实跑完后再导出 SFT：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli export-sft \
+  --traces runs \
+  --output data/sft/unit_completion_tool_calls.jsonl
 ```
 
 构造 PR/Issue Wiki 数据：

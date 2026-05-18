@@ -308,38 +308,61 @@ def build_unit_completion_tasks(
     limit: int = 20,
     tests_dir: str = "tests",
     test_command: str = "python3 -m unittest discover -s tests",
+    min_confidence: float = 0.5,
+    include_methods: bool = False,
+    exclude_private: bool = True,
+    max_per_file: int = 5,
 ) -> BuildSummary:
-    targets = discover_unit_completion_targets(source_repo, tests_dir=tests_dir)[:limit]
+    targets = discover_unit_completion_targets(
+        source_repo,
+        tests_dir=tests_dir,
+        min_confidence=min_confidence,
+        include_methods=include_methods,
+        exclude_private=exclude_private,
+        max_per_file=max_per_file,
+    )[:limit]
     repo_root = output_dir / "repos"
     manifest_path = output_dir / "tasks.jsonl"
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
     repo_root.mkdir(parents=True, exist_ok=True)
+    count = 0
 
     with manifest_path.open("w", encoding="utf-8") as manifest:
         for target in targets:
-            task_id = safe_id(f"unit_{target['module']}_{target['function']}")
+            task_id = safe_id(f"unit_{target['module']}_{target.get('target_class', '')}_{target['function']}")
             repo_path = repo_root / task_id
             if repo_path.exists():
                 shutil.rmtree(repo_path)
             shutil.copytree(source_repo, repo_path, ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "runs", "data"))
-            blank_function_body(repo_path / target["path"], target["function"])
+            target_path = repo_path / target["path"]
+            if not validate_unit_completion_repo(repo_path, target_path, tests_dir):
+                continue
+            if not blank_function_body(target_path, target["function"], target.get("target_class")):
+                continue
+            if not validate_unit_completion_repo(repo_path, target_path, tests_dir):
+                continue
+            row = {
+                "id": task_id,
+                "source": "unit_completion",
+                "repo": f"repos/{task_id}",
+                "task": f"Complete `{target['function']}` in `{target['path']}` so the existing unit tests pass.",
+                "target_file": target["path"],
+                "target_symbol": target["function"],
+                "test_files": target["test_files"],
+                "confidence": target["confidence"],
+                "original_module": target["module"],
+                "original_import": target["original_import"],
+                "test_command": test_command,
+            }
+            if target.get("target_class"):
+                row["target_class"] = target["target_class"]
             manifest.write(
-                json.dumps(
-                    {
-                        "id": task_id,
-                        "source": "unit_completion",
-                        "repo": f"repos/{task_id}",
-                        "task": f"Complete `{target['function']}` in `{target['path']}` so the existing unit tests pass.",
-                        "target_file": target["path"],
-                        "target_symbol": target["function"],
-                        "test_command": test_command,
-                    },
-                    ensure_ascii=False,
-                )
+                json.dumps(row, ensure_ascii=False)
                 + "\n"
             )
+            count += 1
 
-    return BuildSummary(count=len(targets), output_path=manifest_path, extra_path=repo_root)
+    return BuildSummary(count=count, output_path=manifest_path, extra_path=repo_root)
 
 
 def fetch_github_prs(
@@ -451,43 +474,210 @@ def write_humaneval_repo(repo_path: Path, prompt: str, entry_point: str, test: s
     (repo_path / "AGENT.md").write_text("Implement the target function. Run tests after editing.\n", encoding="utf-8")
 
 
-def discover_unit_completion_targets(source_repo: Path, tests_dir: str = "tests") -> list[dict[str, str]]:
-    imported = imported_functions_from_tests(source_repo / tests_dir)
-    targets: list[dict[str, str]] = []
-    seen: set[tuple[str, str]] = set()
-    for module, functions in sorted(imported.items()):
+def discover_unit_completion_targets(
+    source_repo: Path,
+    tests_dir: str = "tests",
+    min_confidence: float = 0.5,
+    include_methods: bool = False,
+    exclude_private: bool = True,
+    max_per_file: int = 5,
+) -> list[dict[str, Any]]:
+    refs = discover_test_function_refs(source_repo / tests_dir)
+    targets: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    per_file: dict[str, int] = {}
+    for ref in refs:
+        function = str(ref.get("function", ""))
+        target_class = str(ref.get("target_class", ""))
+        if ref.get("confidence", 0) < min_confidence:
+            continue
+        if exclude_private and function.startswith("_"):
+            continue
+        if target_class and not include_methods:
+            continue
+        module = str(ref.get("module", ""))
         module_path = resolve_module_path(source_repo, module)
+        if not module_path and include_methods and ref.get("fallback_class_module") and ref.get("fallback_target_class"):
+            module = str(ref["fallback_class_module"])
+            target_class = str(ref["fallback_target_class"])
+            module_path = resolve_module_path(source_repo, module)
         if not module_path:
             continue
-        available = top_level_function_names(module_path)
-        for function in sorted(functions):
-            key = (str(module_path.relative_to(source_repo)), function)
-            if function in available and key not in seen:
-                seen.add(key)
-                targets.append({"module": module, "function": function, "path": str(module_path.relative_to(source_repo))})
+        if target_class and not include_methods:
+            continue
+        path = str(module_path.relative_to(source_repo))
+        if per_file.get(path, 0) >= max_per_file:
+            continue
+        if target_class:
+            if not class_method_exists(module_path, target_class, function):
+                continue
+        elif function not in top_level_function_names(module_path):
+            continue
+        key = (path, target_class, function)
+        if key in seen:
+            continue
+        seen.add(key)
+        per_file[path] = per_file.get(path, 0) + 1
+        target = dict(ref)
+        target["module"] = module
+        target["path"] = path
+        if target_class:
+            target["target_class"] = target_class
+        targets.append(target)
     return targets
 
 
-def imported_functions_from_tests(tests_path: Path) -> dict[str, set[str]]:
-    imported: dict[str, set[str]] = {}
+def discover_test_function_refs(tests_path: Path) -> list[dict[str, Any]]:
+    refs: list[dict[str, Any]] = []
     if not tests_path.exists():
-        return imported
+        return refs
     for path in sorted(tests_path.rglob("test*.py")):
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:
             continue
+        imports = collect_test_imports(tree)
         for node in ast.walk(tree):
-            if isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
-                names = {alias.name for alias in node.names if alias.name != "*"}
-                if names:
-                    imported.setdefault(node.module, set()).update(names)
+            if not isinstance(node, ast.Call):
+                continue
+            ref = ref_from_call(node.func, imports, path)
+            if ref:
+                refs.append(ref)
+    return unique_function_refs(refs)
+
+
+def collect_test_imports(tree: ast.AST) -> dict[str, dict[str, Any]]:
+    imports: dict[str, dict[str, Any]] = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                local = alias.asname or alias.name.split(".")[0]
+                imports[local] = {
+                    "kind": "module",
+                    "module": alias.name,
+                    "original_import": f"import {alias.name}" + (f" as {alias.asname}" if alias.asname else ""),
+                }
+        elif isinstance(node, ast.ImportFrom) and node.module and node.level == 0:
+            for alias in node.names:
+                if alias.name == "*":
+                    continue
+                local = alias.asname or alias.name
+                imports[local] = {
+                    "kind": "from",
+                    "module": node.module,
+                    "name": alias.name,
+                    "original_import": f"from {node.module} import {alias.name}" + (f" as {alias.asname}" if alias.asname else ""),
+                }
+    return imports
+
+
+def ref_from_call(func: ast.expr, imports: dict[str, dict[str, Any]], test_file: Path) -> dict[str, Any] | None:
+    if isinstance(func, ast.Name):
+        imported = imports.get(func.id)
+        if imported and imported["kind"] == "from":
+            return {
+                "module": imported["module"],
+                "function": imported["name"],
+                "alias": func.id,
+                "access_path": func.id,
+                "test_file": str(test_file),
+                "test_files": [str(test_file)],
+                "confidence": 1.0,
+                "original_import": imported["original_import"],
+            }
+    if isinstance(func, ast.Attribute):
+        names = dotted_attribute_names(func)
+        if len(names) < 2:
+            return None
+        base = names[0]
+        imported = imports.get(base)
+        if not imported:
+            return None
+        if imported["kind"] == "module":
+            return {
+                "module": imported["module"],
+                "function": names[-1],
+                "alias": base,
+                "access_path": ".".join(names),
+                "test_file": str(test_file),
+                "test_files": [str(test_file)],
+                "confidence": 0.95,
+                "original_import": imported["original_import"],
+            }
+        if imported["kind"] == "from":
+            if len(names) == 2:
+                return {
+                    "module": f"{imported['module']}.{imported['name']}",
+                    "function": names[-1],
+                    "fallback_class_module": imported["module"],
+                    "fallback_target_class": imported["name"],
+                    "alias": base,
+                    "access_path": ".".join(names),
+                    "test_file": str(test_file),
+                    "test_files": [str(test_file)],
+                    "confidence": 0.9,
+                    "original_import": imported["original_import"],
+                }
+            if len(names) == 3:
+                return {
+                    "module": imported["module"],
+                    "function": names[-1],
+                    "target_class": imported["name"],
+                    "alias": base,
+                    "access_path": ".".join(names),
+                    "test_file": str(test_file),
+                    "test_files": [str(test_file)],
+                    "confidence": 0.75,
+                    "original_import": imported["original_import"],
+                }
+    return None
+
+
+def dotted_attribute_names(node: ast.expr) -> list[str]:
+    names: list[str] = []
+    current: ast.expr | None = node
+    while isinstance(current, ast.Attribute):
+        names.append(current.attr)
+        current = current.value
+    if isinstance(current, ast.Name):
+        names.append(current.id)
+    names.reverse()
+    return names
+
+
+def unique_function_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for ref in refs:
+        key = (str(ref.get("module", "")), str(ref.get("target_class", "")), str(ref.get("function", "")))
+        existing = merged.get(key)
+        if not existing:
+            merged[key] = dict(ref)
+            continue
+        existing_files = list(existing.get("test_files", []))
+        for test_file in ref.get("test_files", []):
+            if test_file not in existing_files:
+                existing_files.append(test_file)
+        existing["test_files"] = existing_files
+        existing["confidence"] = max(float(existing.get("confidence", 0)), float(ref.get("confidence", 0)))
+    return list(merged.values())
+
+
+def imported_functions_from_tests(tests_path: Path) -> dict[str, set[str]]:
+    imported: dict[str, set[str]] = {}
+    for ref in discover_test_function_refs(tests_path):
+        if not ref.get("target_class"):
+            imported.setdefault(str(ref["module"]), set()).add(str(ref["function"]))
     return imported
 
 
 def resolve_module_path(source_repo: Path, module: str) -> Path | None:
     relative = Path(*module.split("."))
-    candidates = [source_repo / relative.with_suffix(".py"), source_repo / "src" / relative.with_suffix(".py")]
+    candidates = [
+        source_repo / relative.with_suffix(".py"),
+        source_repo / relative / "__init__.py",
+        source_repo / "src" / relative.with_suffix(".py"),
+        source_repo / "src" / relative / "__init__.py",
+    ]
     for candidate in candidates:
         if candidate.exists():
             return candidate
@@ -502,10 +692,31 @@ def top_level_function_names(path: Path) -> set[str]:
     return {node.name for node in tree.body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}
 
 
-def blank_function_body(path: Path, function_name: str) -> None:
-    lines = path.read_text(encoding="utf-8").splitlines()
-    tree = ast.parse("\n".join(lines) + "\n")
+def class_method_exists(path: Path, class_name: str, function_name: str) -> bool:
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+    except SyntaxError:
+        return False
     for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            return any(isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef)) and child.name == function_name for child in node.body)
+    return False
+
+
+def blank_function_body(path: Path, function_name: str, class_name: str | None = None) -> bool:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        tree = ast.parse("\n".join(lines) + "\n")
+    except (OSError, SyntaxError):
+        return False
+    body_nodes = tree.body
+    if class_name:
+        body_nodes = []
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and node.name == class_name:
+                body_nodes = node.body
+                break
+    for node in body_nodes:
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == function_name:
             body = list(node.body)
             if body and is_docstring_node(body[0]):
@@ -518,8 +729,18 @@ def blank_function_body(path: Path, function_name: str) -> None:
             elif body:
                 replace_body_lines(lines, body[0], body[-1], "pass")
             path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
-            return
-    raise ValueError(f"function not found: {function_name}")
+            return True
+    return False
+
+
+def validate_unit_completion_repo(repo_path: Path, target_path: Path, tests_dir: str) -> bool:
+    if not target_path.exists() or not (repo_path / tests_dir).exists():
+        return False
+    try:
+        ast.parse(target_path.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return False
+    return True
 
 
 def is_docstring_node(node: ast.AST) -> bool:

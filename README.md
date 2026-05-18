@@ -166,17 +166,36 @@ Build unit-test-driven completion tasks from an existing Python repo:
 python -m agenttrace_sandbox.cli build-unit-completion \
   --repo examples/buggy_calculator \
   --output-dir data/benchmarks/unit_completion \
-  --limit 20
+  --limit 20 \
+  --min-confidence 0.5 \
+  --max-per-file 5
 ```
 
-This scans `tests/test*.py` for imports such as `from calculator import subtract`, copies the repo, blanks the imported function body, and writes a runnable `tasks.jsonl`.
+This scans `tests/test*.py`, confirms the imported functions are actually called, copies the repo, blanks the target function body, and writes a runnable `tasks.jsonl`. Supported test patterns include:
+
+- `from math_utils import add` followed by `add(...)`
+- `import math_utils` followed by `math_utils.add(...)`
+- `import math_utils as mu` followed by `mu.add(...)`
+- `from math_utils import add as plus` followed by `plus(...)`
+- `from pkg import math_utils` followed by `math_utils.add(...)`
+
+Module resolution supports flat modules, `src` layout, and package layout such as `math_utils.py`, `src/pkg/math_utils.py`, `pkg/math_utils.py`, and package `__init__.py` files. The blanker preserves function signatures, decorators, and docstrings, and skips targets that cannot be parsed safely. By default it targets top-level functions; class/static methods can be included with `--include-methods` when they are directly discoverable.
+
+Useful builder controls:
+
+- `--min-confidence`: minimum AST-discovery confidence to keep, default `0.5`.
+- `--include-methods`: include directly discovered class/static methods.
+- `--exclude-private` / `--no-exclude-private`: skip `_private` functions by default.
+- `--max-per-file`: cap generated targets per source file, default `5`.
+
+Each manifest row includes `source`, `target_file`, `target_symbol`, `test_files`, `confidence`, `original_module`, `original_import`, and `target_class` when applicable.
 
 Validate the generated manifest without calling a model:
 
 ```bash
 python -m agenttrace_sandbox.cli run-manifest \
-  --manifest data/benchmarks/mbpp/tasks.jsonl \
-  --output runs/mbpp_results.jsonl \
+  --manifest data/benchmarks/unit_completion/tasks.jsonl \
+  --output runs/unit_completion_results.jsonl \
   --dry-run
 ```
 
@@ -187,7 +206,7 @@ Export successful benchmark traces to SFT:
 ```bash
 python -m agenttrace_sandbox.cli export-sft \
   --traces runs \
-  --output data/sft/benchmark_tool_calls.jsonl
+  --output data/sft/unit_completion_tool_calls.jsonl
 ```
 
 Export only high-quality traces:
