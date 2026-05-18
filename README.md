@@ -177,6 +177,37 @@ python -m agenttrace_sandbox.cli export-sft \
   --output data/sft/benchmark_tool_calls.jsonl
 ```
 
+Export only high-quality traces:
+
+```bash
+python -m agenttrace_sandbox.cli export-sft \
+  --traces runs \
+  --output data/sft/benchmark_tool_calls_strict.jsonl \
+  --strict \
+  --reject-test-edits
+```
+
+Strict export keeps only traces that succeeded, ran passing tests, had clean JSON tool calls, needed no JSON repair retries, and had no tool/policy errors. `--reject-test-edits` also removes traces that changed test files.
+
+If the model succeeds but occasionally wraps one tool call in markdown/prose, use clean-step export:
+
+```bash
+python -m agenttrace_sandbox.cli export-sft \
+  --traces runs \
+  --output data/sft/benchmark_tool_calls_clean_steps.jsonl \
+  --clean-steps \
+  --reject-test-edits
+```
+
+This keeps only clean tool calls from successful traces, instead of rejecting the whole trace.
+
+Summarize benchmark pass rates from a manifest result file:
+
+```bash
+python -m agenttrace_sandbox.cli stats \
+  --manifest-results runs/mbpp_results.jsonl
+```
+
 Build PR/Issue repair wiki records from local JSONL:
 
 ```bash

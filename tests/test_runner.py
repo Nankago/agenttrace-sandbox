@@ -16,7 +16,7 @@ from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
 from agenttrace_sandbox.sandbox import build_docker_command
 from agenttrace_sandbox.sft_export import export_sft
-from agenttrace_sandbox.stats import compute_run_stats
+from agenttrace_sandbox.stats import compute_manifest_stats, compute_run_stats
 
 
 class BadJsonModel:
@@ -222,3 +222,91 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(summary.count, 1)
             self.assertEqual(row["files"], ["calculator.py"])
             self.assertIn("bug_summary", row["wiki"])
+
+    def test_strict_sft_export_filters_noisy_traces(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            good = root / "runs" / "good"
+            noisy = root / "runs" / "noisy"
+            good.mkdir(parents=True)
+            noisy.mkdir(parents=True)
+            write_trace(
+                good / "trace.jsonl",
+                outcome="success",
+                format_violation=False,
+                diff="--- a/solution.py\n+++ b/solution.py\n@@\n-pass\n+return 1",
+            )
+            write_trace(
+                noisy / "trace.jsonl",
+                outcome="success",
+                format_violation=True,
+                diff="--- a/solution.py\n+++ b/solution.py\n@@\n-pass\n+return 1",
+            )
+
+            output = root / "strict.jsonl"
+            count = export_sft(root / "runs", output, strict=True)
+
+            self.assertEqual(count, 2)
+            self.assertIn('"trace":', output.read_text(encoding="utf-8"))
+
+            clean_output = root / "clean.jsonl"
+            clean_count = export_sft(root / "runs", clean_output, clean_steps=True)
+
+            self.assertEqual(clean_count, 3)
+
+    def test_manifest_stats_group_by_source(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            results = root / "results.jsonl"
+            rows = [
+                {"source": {"source": "mbpp"}, "result": {"skipped": False, "outcome": "success"}},
+                {"source": {"source": "mbpp"}, "result": {"skipped": False, "outcome": "test_failed"}},
+                {"source": {"source": "humaneval"}, "result": {"skipped": True}},
+            ]
+            results.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
+
+            stats = compute_manifest_stats(results)
+
+            self.assertEqual(stats.total, 3)
+            self.assertEqual(stats.ran, 2)
+            self.assertEqual(stats.skipped, 1)
+            self.assertEqual(stats.by_source["mbpp"]["pass_rate"], 0.5)
+
+
+def write_trace(path: Path, outcome: str, format_violation: bool, diff: str) -> None:
+    events = [
+        {"event": "run_started", "payload": {"task": "Implement solution."}},
+        {"event": "plan", "payload": {"plan": "Inspect, edit, test."}},
+        {
+            "event": "tool_call",
+            "payload": {
+                "step": 1,
+                "tool": "read_file",
+                "arguments": {"path": "solution.py"},
+                "reason": "inspect",
+                "format_violation": format_violation,
+                "retries_used": 0,
+                "parse_error": "",
+                "result": {"ok": True, "error_type": "", "blocked": False},
+            },
+        },
+        {
+            "event": "tool_call",
+            "payload": {
+                "step": 2,
+                "tool": "run_tests",
+                "arguments": {"command": "python3 -m unittest discover -s tests"},
+                "reason": "validate",
+                "format_violation": False,
+                "retries_used": 0,
+                "parse_error": "",
+                "result": {"ok": True, "error_type": "", "blocked": False},
+            },
+        },
+        {"event": "run_finished", "payload": {"outcome": outcome, "diff": diff}},
+    ]
+    path.write_text("\n".join(json.dumps(event) for event in events) + "\n", encoding="utf-8")

@@ -35,6 +35,26 @@ class RunStats:
         )
 
 
+@dataclass(frozen=True)
+class ManifestStats:
+    total: int
+    ran: int
+    skipped: int
+    by_source: dict[str, dict[str, Any]]
+
+    def render(self) -> str:
+        return json.dumps(
+            {
+                "total": self.total,
+                "ran": self.ran,
+                "skipped": self.skipped,
+                "by_source": self.by_source,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+
+
 def compute_run_stats(runs_path: Path) -> RunStats:
     traces = sorted(runs_path.glob("*/trace.jsonl")) if runs_path.is_dir() else [runs_path]
     outcomes: dict[str, int] = {}
@@ -83,3 +103,33 @@ def compute_run_stats(runs_path: Path) -> RunStats:
         format_violation_rate=format_violations / tool_calls if tool_calls else 0.0,
         backends=backends,
     )
+
+
+def compute_manifest_stats(results_path: Path) -> ManifestStats:
+    groups: dict[str, dict[str, Any]] = {}
+    total = 0
+    ran = 0
+    skipped = 0
+    for row in read_jsonl(results_path):
+        total += 1
+        source = row.get("source", {})
+        result = row.get("result", {})
+        source_name = str(source.get("source") or "unknown")
+        group = groups.setdefault(source_name, {"total": 0, "ran": 0, "skipped": 0, "success": 0, "outcomes": {}})
+        group["total"] += 1
+        if result.get("skipped"):
+            skipped += 1
+            group["skipped"] += 1
+            outcome = "skipped"
+        else:
+            ran += 1
+            group["ran"] += 1
+            outcome = str(result.get("outcome") or "missing_outcome")
+            if outcome == "success":
+                group["success"] += 1
+        outcomes = group["outcomes"]
+        outcomes[outcome] = outcomes.get(outcome, 0) + 1
+
+    for group in groups.values():
+        group["pass_rate"] = round(group["success"] / group["ran"], 4) if group["ran"] else 0.0
+    return ManifestStats(total=total, ran=ran, skipped=skipped, by_source=groups)

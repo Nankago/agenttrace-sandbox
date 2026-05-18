@@ -9,7 +9,7 @@ from agenttrace_sandbox.llm import MockCodingModel, OpenAICompatibleChat
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
 from agenttrace_sandbox.sft_export import export_sft
-from agenttrace_sandbox.stats import compute_run_stats
+from agenttrace_sandbox.stats import compute_manifest_stats, compute_run_stats
 
 
 def add_sandbox_args(parser: argparse.ArgumentParser) -> None:
@@ -63,9 +63,13 @@ def main() -> None:
     export_parser.add_argument("--traces", default=Path("runs"), type=Path)
     export_parser.add_argument("--output", default=Path("data/sft/tool_calls.jsonl"), type=Path)
     export_parser.add_argument("--format", choices=["jsonl", "alpaca"], default="jsonl")
+    export_parser.add_argument("--strict", action="store_true", help="Only export clean successful traces with passing tests.")
+    export_parser.add_argument("--clean-steps", action="store_true", help="Export clean tool calls from successful traces, even if other steps were noisy.")
+    export_parser.add_argument("--reject-test-edits", action="store_true", help="With --strict, reject traces that edit tests.")
 
     stats_parser = sub.add_parser("stats", help="Summarize run traces.")
     stats_parser.add_argument("--runs", default=Path("runs"), type=Path)
+    stats_parser.add_argument("--manifest-results", type=Path, help="Summarize a run-manifest result JSONL by source.")
 
     benchmark_parser = sub.add_parser("build-benchmark", help="Build runnable unit-test repair tasks.")
     benchmark_parser.add_argument("--output-dir", default=Path("data/benchmarks/offline"), type=Path)
@@ -111,10 +115,20 @@ def main() -> None:
         summary = run_manifest(args.manifest, config, model, args.output, limit=args.limit, dry_run=args.dry_run)
         print_result(total=summary.total, ran=summary.ran, skipped=summary.skipped, outcomes=summary.outcomes, output=summary.output_path)
     elif args.command == "export-sft":
-        count = export_sft(args.traces, args.output, output_format=args.format)
+        count = export_sft(
+            args.traces,
+            args.output,
+            output_format=args.format,
+            strict=args.strict,
+            clean_steps=args.clean_steps,
+            reject_test_edits=args.reject_test_edits,
+        )
         print(f"wrote {count} samples to {args.output}")
     elif args.command == "stats":
-        print(compute_run_stats(args.runs).render())
+        if args.manifest_results:
+            print(compute_manifest_stats(args.manifest_results).render())
+        else:
+            print(compute_run_stats(args.runs).render())
     elif args.command == "build-benchmark":
         print(build_benchmark_tasks(args.output_dir, limit=args.limit, source_path=args.input).render())
     elif args.command == "build-mbpp":

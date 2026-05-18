@@ -282,3 +282,40 @@ Implemented response:
 - Added a `modelscope` optional dependency group that includes the required runtime packages.
 - Added a ModelScope loader that uses `MODELSCOPE_SDK_TOKEN` or `MODELSCOPE_API_TOKEN` from the environment without printing or storing the token.
 - Added split fallback logic for ModelScope datasets: requested split, then `train`, `test`, `validation`, and `dev`.
+
+## Small Benchmark Smoke Results
+
+After adding MBPP/HumanEval builders and ModelScope loading, a small real-API benchmark smoke test was run:
+
+```text
+MBPP sample size: 3
+HumanEval sample size: 3
+Model endpoint type: OpenAI-compatible chat completions
+Model used: deepseek-chat
+Sandbox backend: local
+Max steps: 10
+```
+
+Observed results:
+
+```text
+MBPP:      3/3 success, pass_rate=1.0, avg_steps=6.00, format_violation_rate=0.1111
+HumanEval: 3/3 success, pass_rate=1.0, avg_steps=4.67, format_violation_rate=0.2857
+```
+
+SFT export counts:
+
+```text
+MBPP all successful tool calls:         14
+MBPP strict whole-trace samples:         0
+MBPP clean-step samples:                12
+HumanEval all successful tool calls:    11
+HumanEval strict whole-trace samples:    0
+HumanEval clean-step samples:            7
+```
+
+Interpretation:
+
+- Functional pass rate was good on this tiny sample.
+- Strict whole-trace export was zero because every successful trace had at least one recoverable format violation.
+- Clean-step export is currently more useful for building SFT data from real model runs, while strict export is useful as a protocol-compliance target.

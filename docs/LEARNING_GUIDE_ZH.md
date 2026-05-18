@@ -296,6 +296,74 @@ MBPP/HumanEval 原始题目
 
 通俗地说，benchmark builder 做的是“把题目变成 agent 能操作的代码仓库”；runner 做的是“让模型真的在仓库里读文件、改代码、跑测试”；SFT exporter 做的是“把成功过程拆成下一步工具调用训练样本”。
 
+导出高质量 SFT 数据时可以用严格模式：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli export-sft \
+  --traces runs \
+  --output data/sft/benchmark_tool_calls_strict.jsonl \
+  --strict \
+  --reject-test-edits
+```
+
+这个模式会过滤掉：
+
+```text
+没有成功完成的轨迹
+没有跑通测试的轨迹
+工具调用不是干净 JSON 的轨迹
+发生 JSON 修复重试的轨迹
+被安全策略拦截或工具报错的轨迹
+改动测试文件的轨迹
+```
+
+如果模型整体成功，但中间偶尔有一步把 JSON 包进 markdown/prose，可以用更实用的 clean-step 模式：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli export-sft \
+  --traces runs \
+  --output data/sft/benchmark_tool_calls_clean_steps.jsonl \
+  --clean-steps \
+  --reject-test-edits
+```
+
+它不会因为一条轨迹里某一步不干净就丢掉整条轨迹，而是只保留成功轨迹里的干净工具调用。
+
+查看 manifest 结果通过率：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli stats \
+  --manifest-results runs/mbpp_results.jsonl
+```
+
+## 7.2 先跑多少题比较合适
+
+建议分三档推进：
+
+```text
+Smoke:       MBPP 3-5 条 + HumanEval 3-5 条
+Small eval:  MBPP 20-50 条 + HumanEval 20-50 条
+Data run:    MBPP/HumanEval 全量或按预算分批跑
+```
+
+原因是公开 benchmark 题目难度不均匀。先跑 3-5 条可以检查 API、工具协议、测试执行和 SFT 导出是否正常；再跑 20-50 条才比较适合看初步成功率；全量跑更适合最后做数据集构建和论文/简历展示。
+
+一次真实 API smoke 结果示例：
+
+```text
+MBPP:      3/3 success, pass_rate=100%, avg_steps=6.00
+HumanEval: 3/3 success, pass_rate=100%, avg_steps=4.67
+```
+
+但这只是小样本，不代表全量 benchmark 的最终通过率。更有价值的是同时看：
+
+```text
+pass_rate                 任务是否做对
+format_violation_rate     工具调用协议是否干净
+strict SFT count          整条轨迹是否都适合直接训练
+clean-step SFT count      成功轨迹中有多少干净步骤可用
+```
+
 ## 8. Agent 主循环详解
 
 核心逻辑在 `runner.py`。
