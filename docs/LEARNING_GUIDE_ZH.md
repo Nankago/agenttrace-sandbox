@@ -211,7 +211,8 @@ PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-unit-completion \
   --output-dir data/benchmarks/unit_completion \
   --limit 20 \
   --min-confidence 0.5 \
-  --max-per-file 5
+  --max-per-file 5 \
+  --check-baseline
 ```
 
 它会扫描 `tests/test*.py`，先用 AST 确认 import 进来的函数确实被测试调用，再复制 repo、挖空目标函数体并生成 manifest。现在支持这些常见写法：
@@ -244,6 +245,14 @@ pkg/__init__.py
 
 挖空时会保留函数签名、decorator 和 docstring。默认生成 top-level function 任务；如果测试里能直接识别 class/static method，可以用 `--include-methods` 打开方法任务。语法解析失败、目标文件不存在、挖空后不是合法 Python 的目标会被跳过，不会让整个 builder 崩掉。
 
+生成任务前，builder 默认会先跑相关 baseline 测试，例如：
+
+```bash
+python3 -m unittest tests.test_calculator.CalculatorTests.test_add
+```
+
+如果原始 repo 里这个相关测试本来就失败，就跳过该目标，避免“函数补对了但被无关旧 bug 拖失败”的脏样本。对于 `src/` layout，本地测试执行会自动把 `src/` 加进 `PYTHONPATH`。
+
 常用参数：
 
 | 参数 | 说明 |
@@ -252,13 +261,19 @@ pkg/__init__.py
 | `--include-methods` | 允许生成 class/static method 任务 |
 | `--exclude-private` / `--no-exclude-private` | 默认跳过 `_private` 函数 |
 | `--max-per-file` | 每个源码文件最多生成多少个任务，默认 `5` |
+| `--check-baseline` / `--no-check-baseline` | 默认要求相关 baseline 测试先通过 |
+| `--baseline-timeout` | 每个 baseline 检查的超时时间，默认 `30` 秒 |
 
 manifest 每行会包含：
 
 ```text
 source, target_file, target_symbol, test_files, confidence,
-original_module, original_import, target_class(如果有)
+test_selectors, original_module, original_import, test_command,
+full_test_command, baseline_checked, baseline_ok, baseline_command,
+target_class(如果有)
 ```
+
+`run-manifest` 的结果里还会增加简单的 `failure_attribution`，用于区分 `passed`、`baseline_failure`、`model_or_task_failure` 和 `unknown`。
 
 这样得到的任务就是：
 

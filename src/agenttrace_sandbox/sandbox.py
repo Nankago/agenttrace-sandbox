@@ -4,6 +4,7 @@ import shutil
 import shlex
 import subprocess
 import uuid
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -95,6 +96,7 @@ class Sandbox:
         completed = subprocess.run(
             shlex.split(command),
             cwd=self.workspace,
+            env=pythonpath_env(self.workspace),
             text=True,
             capture_output=True,
             timeout=timeout,
@@ -160,3 +162,12 @@ def copy_repo(source: Path, destination: Path) -> None:
         return {name for name in names if name in IGNORED_DIRS}
 
     shutil.copytree(source, destination, ignore=ignore)
+
+
+def pythonpath_env(workspace: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    src_path = workspace / "src"
+    if src_path.exists():
+        existing = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = str(src_path) + ((os.pathsep + existing) if existing else "")
+    return env

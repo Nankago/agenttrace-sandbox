@@ -222,6 +222,8 @@ class RunnerTests(unittest.TestCase):
 
             self.assertEqual(summary.count, 1)
             self.assertEqual(rows[0]["source"], "unit_completion")
+            self.assertEqual(rows[0]["test_command"], "python3 -m unittest tests.test_math_utils.MathTests.test_add")
+            self.assertTrue(rows[0]["baseline_ok"])
             self.assertIn("pass", (task_repo / "math_utils.py").read_text(encoding="utf-8"))
 
             dry_run_summary = run_manifest(summary.output_path, AgentConfig(runs_dir=root / "runs"), MockCodingModel(), root / "results.jsonl", dry_run=True)
@@ -281,15 +283,20 @@ class RunnerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (repo / "tests" / "test_math_utils.py").write_text(
+                "import unittest\n\n"
                 "from math_utils import add\n"
                 "from math_utils import subtract as minus\n"
                 "import math_utils\n"
                 "import math_utils as mu\n\n"
-                "def test_math():\n"
-                "    add(1, 2)\n"
-                "    minus(3, 1)\n"
-                "    math_utils.multiply(2, 3)\n"
-                "    mu.divide(4, 2)\n",
+                "class MathTests(unittest.TestCase):\n"
+                "    def test_add(self):\n"
+                "        add(1, 2)\n"
+                "    def test_subtract(self):\n"
+                "        minus(3, 1)\n"
+                "    def test_multiply(self):\n"
+                "        math_utils.multiply(2, 3)\n"
+                "    def test_divide(self):\n"
+                "        mu.divide(4, 2)\n",
                 encoding="utf-8",
             )
 
@@ -304,6 +311,7 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(symbols, {"add", "subtract", "multiply", "divide"})
             self.assertEqual(add_row["original_module"], "math_utils")
             self.assertIn("test_files", add_row)
+            self.assertEqual(add_row["test_selectors"], ["tests.test_math_utils.MathTests.test_add"])
             self.assertIn('"""Add two numbers."""', add_source)
             self.assertIn("pass", add_source)
 
@@ -322,9 +330,11 @@ class RunnerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (repo / "tests" / "test_pkg.py").write_text(
+                "import unittest\n\n"
                 "from pkg import math_utils\n\n"
-                "def test_add():\n"
-                "    math_utils.add(1, 2)\n",
+                "class PkgTests(unittest.TestCase):\n"
+                "    def test_add(self):\n"
+                "        math_utils.add(1, 2)\n",
                 encoding="utf-8",
             )
 
@@ -352,11 +362,13 @@ class RunnerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (repo / "tests" / "test_math_utils.py").write_text(
+                "import unittest\n\n"
                 "from math_utils import _hidden, first, second\n\n"
-                "def test_values():\n"
-                "    _hidden()\n"
-                "    first()\n"
-                "    second()\n",
+                "class MathTests(unittest.TestCase):\n"
+                "    def test_values(self):\n"
+                "        _hidden()\n"
+                "        first()\n"
+                "        second()\n",
                 encoding="utf-8",
             )
 
@@ -383,9 +395,11 @@ class RunnerTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (repo / "tests" / "test_calculator.py").write_text(
+                "import unittest\n\n"
                 "from calculator import Calculator\n\n"
-                "def test_add():\n"
-                "    Calculator.add(1, 2)\n",
+                "class CalculatorTests(unittest.TestCase):\n"
+                "    def test_add(self):\n"
+                "        Calculator.add(1, 2)\n",
                 encoding="utf-8",
             )
 
@@ -400,6 +414,22 @@ class RunnerTests(unittest.TestCase):
             self.assertEqual(rows[0]["target_class"], "Calculator")
             self.assertIn('"""Add two values."""', source)
             self.assertIn("pass", source)
+
+    def test_build_unit_completion_baseline_filters_dirty_targets(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            repo = Path("examples/buggy_calculator").resolve()
+
+            summary = build_unit_completion_tasks(repo, root / "unit_tasks", limit=10)
+            rows = [json.loads(line) for line in summary.output_path.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual(summary.count, 1)
+            self.assertEqual(rows[0]["target_symbol"], "add")
+            self.assertEqual(rows[0]["test_command"], "python3 -m unittest tests.test_calculator.CalculatorTests.test_add")
+            self.assertTrue(rows[0]["baseline_checked"])
+            self.assertTrue(rows[0]["baseline_ok"])
 
     def test_dataset_loader_offline_and_split_dict(self) -> None:
         rows = load_dataset_rows("unused", "test", [{"id": 1}], dataset_source="offline")

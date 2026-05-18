@@ -93,6 +93,8 @@ def main() -> None:
     unit_parser.add_argument("--include-methods", action="store_true")
     unit_parser.add_argument("--exclude-private", action=argparse.BooleanOptionalAction, default=True)
     unit_parser.add_argument("--max-per-file", type=int, default=5)
+    unit_parser.add_argument("--check-baseline", action=argparse.BooleanOptionalAction, default=True)
+    unit_parser.add_argument("--baseline-timeout", type=int, default=30)
 
     mbpp_parser = sub.add_parser("build-mbpp", help="Build runnable MBPP-style function implementation tasks.")
     mbpp_parser.add_argument("--output-dir", default=Path("data/benchmarks/mbpp"), type=Path)
@@ -171,6 +173,8 @@ def main() -> None:
                 include_methods=args.include_methods,
                 exclude_private=args.exclude_private,
                 max_per_file=args.max_per_file,
+                check_baseline=args.check_baseline,
+                baseline_timeout=args.baseline_timeout,
             ).render()
         )
     elif args.command == "build-mbpp":

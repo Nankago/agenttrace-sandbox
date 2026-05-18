@@ -5,6 +5,8 @@ import json
 import os
 import re
 import shutil
+import shlex
+import subprocess
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
@@ -12,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from agenttrace_sandbox.tracing import read_jsonl
+from agenttrace_sandbox.sandbox import pythonpath_env
 
 
 @dataclass(frozen=True)
@@ -312,6 +315,8 @@ def build_unit_completion_tasks(
     include_methods: bool = False,
     exclude_private: bool = True,
     max_per_file: int = 5,
+    check_baseline: bool = True,
+    baseline_timeout: int = 30,
 ) -> BuildSummary:
     targets = discover_unit_completion_targets(
         source_repo,
@@ -337,6 +342,15 @@ def build_unit_completion_tasks(
             target_path = repo_path / target["path"]
             if not validate_unit_completion_repo(repo_path, target_path, tests_dir):
                 continue
+            relevant_test_command = unit_completion_test_command(target, test_command)
+            baseline = run_baseline_check(repo_path, relevant_test_command, baseline_timeout) if check_baseline else {
+                "checked": False,
+                "ok": True,
+                "command": relevant_test_command,
+                "output": "",
+            }
+            if check_baseline and not baseline["ok"]:
+                continue
             if not blank_function_body(target_path, target["function"], target.get("target_class")):
                 continue
             if not validate_unit_completion_repo(repo_path, target_path, tests_dir):
@@ -349,11 +363,18 @@ def build_unit_completion_tasks(
                 "target_file": target["path"],
                 "target_symbol": target["function"],
                 "test_files": target["test_files"],
+                "test_selectors": target.get("test_selectors", []),
                 "confidence": target["confidence"],
                 "original_module": target["module"],
                 "original_import": target["original_import"],
-                "test_command": test_command,
+                "test_command": relevant_test_command,
+                "full_test_command": test_command,
+                "baseline_checked": baseline["checked"],
+                "baseline_ok": baseline["ok"],
+                "baseline_command": baseline["command"],
             }
+            if baseline["output"]:
+                row["baseline_output_excerpt"] = compact_text(baseline["output"])[:500]
             if target.get("target_class"):
                 row["target_class"] = target["target_class"]
             manifest.write(
@@ -521,6 +542,8 @@ def discover_unit_completion_targets(
         target = dict(ref)
         target["module"] = module
         target["path"] = path
+        target["test_files"] = relative_test_files(source_repo, target.get("test_files", []))
+        target["test_selectors"] = relative_test_selectors(source_repo, target.get("test_selectors", []))
         if target_class:
             target["target_class"] = target_class
         targets.append(target)
@@ -537,13 +560,28 @@ def discover_test_function_refs(tests_path: Path) -> list[dict[str, Any]]:
         except SyntaxError:
             continue
         imports = collect_test_imports(tree)
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            ref = ref_from_call(node.func, imports, path)
+        for node, class_name, test_name in iter_test_calls(tree):
+            ref = ref_from_call(node.func, imports, path, class_name=class_name, test_name=test_name)
             if ref:
                 refs.append(ref)
     return unique_function_refs(refs)
+
+
+def iter_test_calls(tree: ast.AST) -> list[tuple[ast.Call, str, str]]:
+    calls: list[tuple[ast.Call, str, str]] = []
+
+    def visit_body(nodes: list[ast.stmt], class_name: str = "") -> None:
+        for node in nodes:
+            if isinstance(node, ast.ClassDef):
+                visit_body(node.body, class_name=node.name)
+            elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
+                for child in ast.walk(node):
+                    if isinstance(child, ast.Call):
+                        calls.append((child, class_name, node.name))
+
+    if isinstance(tree, ast.Module):
+        visit_body(tree.body)
+    return calls
 
 
 def collect_test_imports(tree: ast.AST) -> dict[str, dict[str, Any]]:
@@ -571,7 +609,14 @@ def collect_test_imports(tree: ast.AST) -> dict[str, dict[str, Any]]:
     return imports
 
 
-def ref_from_call(func: ast.expr, imports: dict[str, dict[str, Any]], test_file: Path) -> dict[str, Any] | None:
+def ref_from_call(
+    func: ast.expr,
+    imports: dict[str, dict[str, Any]],
+    test_file: Path,
+    class_name: str = "",
+    test_name: str = "",
+) -> dict[str, Any] | None:
+    test_selector = python_test_selector(test_file, class_name, test_name)
     if isinstance(func, ast.Name):
         imported = imports.get(func.id)
         if imported and imported["kind"] == "from":
@@ -582,6 +627,9 @@ def ref_from_call(func: ast.expr, imports: dict[str, dict[str, Any]], test_file:
                 "access_path": func.id,
                 "test_file": str(test_file),
                 "test_files": [str(test_file)],
+                "test_selectors": [test_selector] if test_selector else [],
+                "test_class": class_name,
+                "test_name": test_name,
                 "confidence": 1.0,
                 "original_import": imported["original_import"],
             }
@@ -601,6 +649,9 @@ def ref_from_call(func: ast.expr, imports: dict[str, dict[str, Any]], test_file:
                 "access_path": ".".join(names),
                 "test_file": str(test_file),
                 "test_files": [str(test_file)],
+                "test_selectors": [test_selector] if test_selector else [],
+                "test_class": class_name,
+                "test_name": test_name,
                 "confidence": 0.95,
                 "original_import": imported["original_import"],
             }
@@ -615,6 +666,9 @@ def ref_from_call(func: ast.expr, imports: dict[str, dict[str, Any]], test_file:
                     "access_path": ".".join(names),
                     "test_file": str(test_file),
                     "test_files": [str(test_file)],
+                    "test_selectors": [test_selector] if test_selector else [],
+                    "test_class": class_name,
+                    "test_name": test_name,
                     "confidence": 0.9,
                     "original_import": imported["original_import"],
                 }
@@ -627,6 +681,9 @@ def ref_from_call(func: ast.expr, imports: dict[str, dict[str, Any]], test_file:
                     "access_path": ".".join(names),
                     "test_file": str(test_file),
                     "test_files": [str(test_file)],
+                    "test_selectors": [test_selector] if test_selector else [],
+                    "test_class": class_name,
+                    "test_name": test_name,
                     "confidence": 0.75,
                     "original_import": imported["original_import"],
                 }
@@ -658,6 +715,11 @@ def unique_function_refs(refs: list[dict[str, Any]]) -> list[dict[str, Any]]:
             if test_file not in existing_files:
                 existing_files.append(test_file)
         existing["test_files"] = existing_files
+        existing_selectors = list(existing.get("test_selectors", []))
+        for selector in ref.get("test_selectors", []):
+            if selector and selector not in existing_selectors:
+                existing_selectors.append(selector)
+        existing["test_selectors"] = existing_selectors
         existing["confidence"] = max(float(existing.get("confidence", 0)), float(ref.get("confidence", 0)))
     return list(merged.values())
 
@@ -741,6 +803,85 @@ def validate_unit_completion_repo(repo_path: Path, target_path: Path, tests_dir:
     except (OSError, SyntaxError):
         return False
     return True
+
+
+def unit_completion_test_command(target: dict[str, Any], fallback: str) -> str:
+    selectors = [str(selector) for selector in target.get("test_selectors", []) if selector]
+    if selectors:
+        return "python3 -m unittest " + " ".join(selectors)
+    test_files = [str(path) for path in target.get("test_files", []) if path]
+    modules = [test_module_from_path(Path(path)) for path in test_files]
+    modules = [module for module in modules if module]
+    if modules:
+        return "python3 -m unittest " + " ".join(modules)
+    return fallback
+
+
+def run_baseline_check(repo_path: Path, command: str, timeout: int) -> dict[str, Any]:
+    try:
+        completed = subprocess.run(
+            shlex.split(command),
+            cwd=repo_path,
+            env=pythonpath_env(repo_path),
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+        output = (completed.stdout + "\n" + completed.stderr).strip()
+        return {"checked": True, "ok": completed.returncode == 0, "command": command, "output": output}
+    except Exception as exc:  # noqa: BLE001
+        return {"checked": True, "ok": False, "command": command, "output": f"{type(exc).__name__}: {exc}"}
+
+
+def python_test_selector(test_file: Path, class_name: str, test_name: str) -> str:
+    if not test_name:
+        return ""
+    module = test_module_from_path(test_file)
+    if not module:
+        return ""
+    parts = [module]
+    if class_name:
+        parts.append(class_name)
+    parts.append(test_name)
+    return ".".join(parts)
+
+
+def test_module_from_path(path: Path) -> str:
+    without_suffix = path.with_suffix("")
+    return ".".join(without_suffix.parts)
+
+
+def relative_test_files(source_repo: Path, test_files: Any) -> list[str]:
+    values: list[str] = []
+    for test_file in test_files if isinstance(test_files, list) else []:
+        path = Path(str(test_file))
+        try:
+            value = path.resolve().relative_to(source_repo.resolve()).as_posix()
+        except ValueError:
+            value = path.as_posix()
+        if value not in values:
+            values.append(value)
+    return values
+
+
+def relative_test_selectors(source_repo: Path, selectors: Any) -> list[str]:
+    values: list[str] = []
+    repo_parts = source_repo.resolve().parts
+    for selector in selectors if isinstance(selectors, list) else []:
+        value = str(selector)
+        parts = value.split(".")
+        for index in range(len(repo_parts), 0, -1):
+            prefix = ".".join(repo_parts[-index:])
+            if value.startswith(prefix + "."):
+                value = value[len(prefix) + 1 :]
+                break
+        marker = ".tests."
+        if marker in value:
+            value = "tests." + value.split(marker, 1)[1]
+        if value not in values:
+            values.append(value)
+    return values
 
 
 def is_docstring_node(node: ast.AST) -> bool:

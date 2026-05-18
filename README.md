@@ -168,7 +168,8 @@ python -m agenttrace_sandbox.cli build-unit-completion \
   --output-dir data/benchmarks/unit_completion \
   --limit 20 \
   --min-confidence 0.5 \
-  --max-per-file 5
+  --max-per-file 5 \
+  --check-baseline
 ```
 
 This scans `tests/test*.py`, confirms the imported functions are actually called, copies the repo, blanks the target function body, and writes a runnable `tasks.jsonl`. Supported test patterns include:
@@ -181,14 +182,18 @@ This scans `tests/test*.py`, confirms the imported functions are actually called
 
 Module resolution supports flat modules, `src` layout, and package layout such as `math_utils.py`, `src/pkg/math_utils.py`, `pkg/math_utils.py`, and package `__init__.py` files. The blanker preserves function signatures, decorators, and docstrings, and skips targets that cannot be parsed safely. By default it targets top-level functions; class/static methods can be included with `--include-methods` when they are directly discoverable.
 
+Before blanking a target, the builder now runs a narrow baseline check against the relevant unittest selector when it can identify one, such as `python3 -m unittest tests.test_calculator.CalculatorTests.test_add`. If that baseline test already fails in the original repo, the target is skipped. This prevents unrelated pre-existing failures from turning a correct completion into a failed trace. Local test execution also adds `src/` to `PYTHONPATH` when a repo uses src layout.
+
 Useful builder controls:
 
 - `--min-confidence`: minimum AST-discovery confidence to keep, default `0.5`.
 - `--include-methods`: include directly discovered class/static methods.
 - `--exclude-private` / `--no-exclude-private`: skip `_private` functions by default.
 - `--max-per-file`: cap generated targets per source file, default `5`.
+- `--check-baseline` / `--no-check-baseline`: require relevant baseline tests to pass before generating a task, default enabled.
+- `--baseline-timeout`: timeout for each baseline check, default `30` seconds.
 
-Each manifest row includes `source`, `target_file`, `target_symbol`, `test_files`, `confidence`, `original_module`, `original_import`, and `target_class` when applicable.
+Each manifest row includes `source`, `target_file`, `target_symbol`, `test_files`, `test_selectors`, `confidence`, `original_module`, `original_import`, `test_command`, `full_test_command`, `baseline_checked`, `baseline_ok`, `baseline_command`, and `target_class` when applicable. `run-manifest` also records a simple `failure_attribution` value so unit-completion failures can be separated from baseline failures or ordinary model/task failures.
 
 Validate the generated manifest without calling a model:
 

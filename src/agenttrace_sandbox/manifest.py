@@ -71,6 +71,7 @@ def run_manifest(
                         "ok": result.outcome == "success",
                         "skipped": False,
                         "outcome": result.outcome,
+                        "failure_attribution": failure_attribution(row, result.outcome),
                         "run_id": result.run_id,
                         "trace_path": str(result.trace_path),
                         "workspace": str(result.workspace),
@@ -88,3 +89,15 @@ def run_manifest(
 
 def write_record(handle, source: dict[str, Any], result: dict[str, Any]) -> None:
     handle.write(json.dumps({"source": source, "result": result}, ensure_ascii=False) + "\n")
+
+
+def failure_attribution(row: dict[str, Any], outcome: str) -> str:
+    if outcome == "success":
+        return "passed"
+    if row.get("source") != "unit_completion":
+        return "unknown"
+    if row.get("baseline_checked") and not row.get("baseline_ok"):
+        return "baseline_failure"
+    if outcome == "test_failed":
+        return "model_or_task_failure"
+    return "unknown"
