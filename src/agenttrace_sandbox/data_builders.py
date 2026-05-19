@@ -167,6 +167,17 @@ BUG_FIX_NEGATIVE_KEYWORDS = [
     "ci",
     "test-only",
 ]
+ISSUE_CLOSING_KEYWORDS = (
+    "fix",
+    "fixes",
+    "fixed",
+    "close",
+    "closes",
+    "closed",
+    "resolve",
+    "resolves",
+    "resolved",
+)
 LOW_SIGNAL_DIFF_SUFFIXES = (
     ".lock",
     "package-lock.json",
@@ -1132,12 +1143,24 @@ def github_api_text(path: str, params: dict[str, str] | None = None, accept: str
 
 
 def linked_issue_number(title: str, body: str = "") -> int | None:
-    text = f"{title}\n{body}"
-    strong = re.search(r"\b(?:fix(?:e[sd])?|clos(?:e[sd]?|ing)|resolv(?:e[sd]?|ing))\s+#(\d+)", text, flags=re.IGNORECASE)
-    if strong:
-        return int(strong.group(1))
-    fallback = re.search(r"#(\d+)", text)
-    return int(fallback.group(1)) if fallback else None
+    text = strip_issue_reference_noise(f"{title}\n{body}")
+    keyword_pattern = "|".join(re.escape(keyword) for keyword in ISSUE_CLOSING_KEYWORDS)
+    patterns = [
+        rf"\b(?:{keyword_pattern})\s*:?\s+(?:[\w.-]+/[\w.-]+)?#(\d+)\b",
+        rf"\b(?:{keyword_pattern})\s*:?\s+https://github\.com/[^/\s]+/[^/\s]+/issues/(\d+)\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return int(match.group(1))
+    return None
+
+
+def strip_issue_reference_noise(text: str) -> str:
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
+    text = re.sub(r"```.*?```", " ", text, flags=re.DOTALL)
+    text = re.sub(r"`[^`]*`", " ", text)
+    return text
 
 
 def is_bug_fix_record(record: dict[str, Any]) -> bool:
@@ -1167,6 +1190,7 @@ def bug_fix_quality(record: dict[str, Any]) -> dict[str, Any]:
     positive_text = keyword_hits(text, BUG_FIX_POSITIVE_KEYWORDS)
     positive_diff = keyword_hits(diff_text, BUG_FIX_POSITIVE_KEYWORDS)
     negative_text = keyword_hits(text, BUG_FIX_NEGATIVE_KEYWORDS)
+    consistency = issue_pr_consistency_score(record)
 
     score = 0.0
     reasons: list[str] = []
@@ -1179,6 +1203,13 @@ def bug_fix_quality(record: dict[str, Any]) -> dict[str, Any]:
     if record.get("issue_number"):
         score += 1
         reasons.append("linked issue")
+        if record.get("issue_title") or record.get("issue_body"):
+            if consistency >= 0.12:
+                score += 0.5
+                reasons.append("issue and PR text are consistent")
+            elif consistency < 0.04:
+                score -= 1.5
+                reasons.append("issue and PR text are weakly aligned")
     if source_files:
         score += 1
         reasons.append("touches source files")
@@ -1216,7 +1247,56 @@ def bug_fix_quality(record: dict[str, Any]) -> dict[str, Any]:
         "dependency_only": dependency_only,
         "low_signal_only": low_signal_only,
         "large_patch": huge_patch,
+        "issue_pr_consistency": consistency,
     }
+
+
+def issue_pr_consistency_score(record: dict[str, Any]) -> float:
+    issue_text = " ".join([str(record.get("issue_title") or ""), str(record.get("issue_body") or "")])
+    pr_text = strip_issue_reference_noise(" ".join([str(record.get("pr_title") or ""), str(record.get("pr_body") or "")]))
+    if not issue_text.strip() or not pr_text.strip():
+        return 0.0
+    issue_tokens = meaningful_tokens(issue_text)
+    pr_tokens = meaningful_tokens(pr_text)
+    if not issue_tokens or not pr_tokens:
+        return 0.0
+    overlap = issue_tokens & pr_tokens
+    return round(len(overlap) / min(len(issue_tokens), len(pr_tokens)), 3)
+
+
+def meaningful_tokens(text: str) -> set[str]:
+    stopwords = {
+        "about",
+        "after",
+        "against",
+        "also",
+        "and",
+        "are",
+        "before",
+        "being",
+        "between",
+        "but",
+        "can",
+        "does",
+        "for",
+        "from",
+        "has",
+        "have",
+        "into",
+        "not",
+        "should",
+        "that",
+        "the",
+        "this",
+        "through",
+        "when",
+        "where",
+        "with",
+        "without",
+        "would",
+    }
+    tokens = {token.lower() for token in re.findall(r"[A-Za-z_][A-Za-z0-9_]{2,}", text)}
+    return {token for token in tokens if token not in stopwords}
 
 
 def keyword_hits(text: str, keywords: list[str]) -> list[str]:

@@ -878,7 +878,10 @@ class RunnerTests(unittest.TestCase):
     def test_linked_issue_number(self) -> None:
         self.assertEqual(linked_issue_number("Fixed #37102"), 37102)
         self.assertEqual(linked_issue_number("Update parser", "Fixes #123 and updates docs"), 123)
-        self.assertEqual(linked_issue_number("Follow up for #456"), 456)
+        self.assertEqual(linked_issue_number("Fix parser", "Closes https://github.com/owner/repo/issues/456"), 456)
+        self.assertEqual(linked_issue_number("Follow up for #456"), None)
+        self.assertEqual(linked_issue_number("Update parser", "<!-- Example: Fixes #999 -->\nNo linked issue."), None)
+        self.assertEqual(linked_issue_number("Update parser", "```text\nFixes #888\n```"), None)
         self.assertEqual(linked_issue_number("No linked issue"), None)
 
     def test_bug_fix_quality_filters_docs_only(self) -> None:
