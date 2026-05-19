@@ -167,6 +167,36 @@ BUG_FIX_NEGATIVE_KEYWORDS = [
     "ci",
     "test-only",
 ]
+LOW_SIGNAL_DIFF_SUFFIXES = (
+    ".lock",
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "go.sum",
+    ".min.js",
+    ".min.css",
+)
+LOW_SIGNAL_DIFF_PARTS = (
+    "/vendor/",
+    "/dist/",
+    "/build/",
+    "/generated/",
+    "/node_modules/",
+    "/migrations/",
+)
+DEPENDENCY_FILE_NAMES = {
+    "package-lock.json",
+    "yarn.lock",
+    "pnpm-lock.yaml",
+    "poetry.lock",
+    "pdm.lock",
+    "requirements.txt",
+    "go.sum",
+    "cargo.lock",
+    "gemfile.lock",
+}
+MAX_REPAIR_EVIDENCE_DIFF_LINES = 90
 
 
 def build_benchmark_tasks(output_dir: Path, limit: int = 5, source_path: Path | None = None) -> BuildSummary:
@@ -1121,6 +1151,10 @@ def bug_fix_quality(record: dict[str, Any]) -> dict[str, Any]:
     test_files = [path for path in files if is_test_file(path)]
     docs_only = bool(files) and all(is_docs_or_config_file(path) for path in files)
     tests_only = bool(files) and bool(test_files) and not source_files
+    dependency_only = bool(files) and all(is_dependency_file(path) for path in files)
+    low_signal_only = bool(files) and all(is_low_signal_diff_file(path) or is_docs_or_config_file(path) for path in files)
+    added, removed = diff_line_counts(diff)
+    huge_patch = len(files) > 30 or added + removed > 1800
     text = "\n".join(
         [
             str(record.get("pr_title") or ""),
@@ -1160,8 +1194,17 @@ def bug_fix_quality(record: dict[str, Any]) -> dict[str, Any]:
     if tests_only:
         score -= 3
         reasons.append("tests only")
+    if dependency_only:
+        score -= 4
+        reasons.append("dependency files only")
+    if low_signal_only and not source_files:
+        score -= 3
+        reasons.append("low-signal generated/vendor/config files only")
+    if huge_patch:
+        score -= 2
+        reasons.append("very large patch")
 
-    is_bug_fix = score >= 2 and not docs_only and not tests_only
+    is_bug_fix = score >= 2 and not docs_only and not tests_only and not dependency_only and not (low_signal_only and not source_files)
     return {
         "is_bug_fix": is_bug_fix,
         "bug_fix_score": score,
@@ -1170,6 +1213,9 @@ def bug_fix_quality(record: dict[str, Any]) -> dict[str, Any]:
         "test_files": test_files,
         "docs_only": docs_only,
         "tests_only": tests_only,
+        "dependency_only": dependency_only,
+        "low_signal_only": low_signal_only,
+        "large_patch": huge_patch,
     }
 
 
@@ -1184,7 +1230,7 @@ def keyword_hits(text: str, keywords: list[str]) -> list[str]:
 
 
 def is_source_file(path: str) -> bool:
-    return bool(path) and not is_test_file(path) and not is_docs_or_config_file(path)
+    return bool(path) and not is_test_file(path) and not is_docs_or_config_file(path) and not is_low_signal_diff_file(path)
 
 
 def is_test_file(path: str) -> bool:
@@ -1216,6 +1262,27 @@ def is_docs_or_config_file(path: str) -> bool:
     if lowered.endswith((".md", ".rst", ".txt", ".adoc")):
         return True
     return lowered.endswith((".yml", ".yaml")) and ("workflow" in lowered or "ci" in lowered)
+
+
+def is_dependency_file(path: str) -> bool:
+    lowered = path.lower()
+    name = Path(lowered).name
+    return name in DEPENDENCY_FILE_NAMES or lowered.endswith((".lock", ".sum"))
+
+
+def is_low_signal_diff_file(path: str) -> bool:
+    lowered = path.lower()
+    name = Path(lowered).name
+    if name in DEPENDENCY_FILE_NAMES or lowered.endswith(LOW_SIGNAL_DIFF_SUFFIXES):
+        return True
+    wrapped = f"/{lowered}"
+    return any(part in wrapped for part in LOW_SIGNAL_DIFF_PARTS)
+
+
+def diff_line_counts(diff: str) -> tuple[int, int]:
+    added = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    removed = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
+    return added, removed
 
 
 def make_repair_card(record: dict[str, Any]) -> dict[str, Any]:
@@ -1319,12 +1386,15 @@ def repair_evidence(record: dict[str, Any], diff: str) -> list[dict[str, Any]]:
     add("pr_text", pr_text, anchor=f"pr#{record.get('pr_number')}" if record.get("pr_number") else "")
 
     for path, patch in diff_file_patches(diff).items():
+        cleaned_patch = clean_diff_patch_for_evidence(path, patch)
+        if not cleaned_patch:
+            continue
         if is_test_file(path):
-            add("test_diff", patch, file=path)
+            add("test_diff", cleaned_patch, file=path)
         elif is_source_file(path):
-            add("source_diff", patch, file=path)
+            add("source_diff", cleaned_patch, file=path)
         elif patch.strip():
-            add("other_diff", patch, file=path)
+            add("other_diff", cleaned_patch, file=path)
     return evidence
 
 
@@ -1501,6 +1571,51 @@ def diff_file_patches(diff: str) -> dict[str, str]:
         if current:
             patches[current].append(line)
     return {path: "\n".join(lines) for path, lines in patches.items()}
+
+
+def clean_diff_patch_for_evidence(path: str, patch: str) -> str:
+    if is_low_signal_diff_file(path) or is_binary_patch(patch):
+        return ""
+    lines = patch.splitlines()
+    useful: list[str] = []
+    omitted = 0
+    for line in lines:
+        if line.startswith(("index ", "similarity index ", "rename from ", "rename to ")):
+            continue
+        if line.startswith(("diff --git ", "--- ", "+++ ", "@@")):
+            useful.append(line)
+            continue
+        if line.startswith(("+", "-")):
+            if is_low_signal_diff_line(line):
+                omitted += 1
+                continue
+            useful.append(line)
+        elif len(useful) < MAX_REPAIR_EVIDENCE_DIFF_LINES and line.strip():
+            useful.append(line)
+        else:
+            omitted += 1
+        if len(useful) >= MAX_REPAIR_EVIDENCE_DIFF_LINES:
+            omitted += max(0, len(lines) - len(useful))
+            break
+    if omitted:
+        useful.append(f"... omitted {omitted} low-signal or excess diff lines ...")
+    return "\n".join(useful).strip()
+
+
+def is_binary_patch(patch: str) -> bool:
+    lowered = patch.lower()
+    return "binary files " in lowered or "git binary patch" in lowered
+
+
+def is_low_signal_diff_line(line: str) -> bool:
+    text = line[1:].strip() if line.startswith(("+", "-")) else line.strip()
+    if not text:
+        return True
+    if len(text) > 500:
+        return True
+    if re.fullmatch(r"[{}\[\],:0-9A-Fa-fx_.\"' -]+", text) and len(text) > 120:
+        return True
+    return False
 
 
 def summarize_diff_for_files(diff: str, selected_files: list[str]) -> str:

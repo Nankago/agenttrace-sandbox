@@ -12,7 +12,7 @@ SYSTEM_PROMPT = "You are a coding agent. Return exactly one safe JSON tool call 
 SFT_INSTRUCTION = "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON."
 REPAIR_SFT_TASKS = {"localize_files", "explain_bug", "repair_rationale", "test_spec", "repair_instruction"}
 REPAIR_SFT_VARIANTS = {"full", "no-tests", "no-llm", "diff-only"}
-BOILERPLATE_POLICIES = {"keep", "light", "strict"}
+BOILERPLATE_POLICIES = {"keep", "light", "strict", "semantic"}
 
 
 def export_sft(
@@ -41,7 +41,7 @@ def export_repair_sft(
     min_quality: float = 0.0,
     require_grounding: bool = False,
     variant: str = "full",
-    boilerplate_policy: str = "light",
+    boilerplate_policy: str = "semantic",
 ) -> int:
     if variant not in REPAIR_SFT_VARIANTS:
         raise ValueError(f"unknown repair SFT variant: {variant}")
@@ -72,7 +72,7 @@ def export_repair_corpus(
     output_format: str = "jsonl",
     max_evidence_chars: int = 1200,
     include_raw_diff: bool = False,
-    boilerplate_policy: str = "light",
+    boilerplate_policy: str = "semantic",
 ) -> int:
     if output_format != "jsonl":
         raise ValueError(f"unsupported repair corpus format: {output_format}")
@@ -97,7 +97,7 @@ def collect_repair_sft_samples(
     min_quality: float = 0.0,
     require_grounding: bool = False,
     variant: str = "full",
-    boilerplate_policy: str = "light",
+    boilerplate_policy: str = "semantic",
 ) -> list[dict[str, Any]]:
     samples: list[dict[str, Any]] = []
     for card in read_jsonl(input_path):
@@ -116,7 +116,7 @@ def make_repair_sft_sample(
     task: str,
     require_grounding: bool = False,
     variant: str = "full",
-    boilerplate_policy: str = "light",
+    boilerplate_policy: str = "semantic",
 ) -> dict[str, Any] | None:
     evidence = variant_evidence(card.get("evidence", []), variant)
     evidence_text = format_repair_evidence(evidence, boilerplate_policy=boilerplate_policy)
@@ -646,6 +646,8 @@ def claim_text(value: Any) -> str:
 
 
 def summarize_evidence_diff(diff: str) -> str:
+    if is_binary_or_low_signal_diff(diff):
+        return "low-signal or binary diff omitted"
     added = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
     removed = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
     files = []
@@ -654,7 +656,8 @@ def summarize_evidence_diff(diff: str) -> str:
         if match:
             files.append(match.group(2))
     file_text = f"files={join_values(files)}; " if files else ""
-    return f"{file_text}added lines={added}, removed lines={removed}"
+    hunks = sum(1 for line in diff.splitlines() if line.startswith("@@"))
+    return f"{file_text}hunks={hunks}; added lines={added}, removed lines={removed}"
 
 
 def clean_repair_text(text: str, policy: str = "light") -> str:
@@ -663,8 +666,10 @@ def clean_repair_text(text: str, policy: str = "light") -> str:
     cleaned = remove_html_comments(text)
     cleaned = remove_template_sections(cleaned, ["AI Assistance Disclosure", "Checklist", "Backport"], keep_semantic_tail=True)
     cleaned = remove_checkbox_boilerplate(cleaned)
-    if policy == "strict":
+    if policy in {"strict", "semantic"}:
         cleaned = remove_template_sentences(cleaned)
+    if policy == "semantic":
+        cleaned = keep_semantic_pr_sections(cleaned)
     return compact_spaces(cleaned)
 
 
@@ -699,6 +704,10 @@ def remove_checkbox_boilerplate(text: str) -> str:
         "no ai tools were used",
         "if ai tools were used",
         "fully reviewed and verified their output",
+        "automated ai review",
+        "has patch",
+        "attached screenshots",
+        "added or updated relevant docs",
     ]
     for line in text.splitlines():
         lowered = line.lower()
@@ -722,6 +731,113 @@ def remove_template_sentences(text: str) -> str:
     for pattern in patterns:
         cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
     return cleaned
+
+
+def keep_semantic_pr_sections(text: str) -> str:
+    sections = split_markdown_sections(text)
+    if not sections:
+        return text
+    semantic_headings = {
+        "",
+        "title",
+        "summary",
+        "description",
+        "problem",
+        "branch description",
+        "reproduction",
+        "steps to reproduce",
+        "actual behavior",
+        "expected behavior",
+        "test plan",
+        "tests",
+        "tests run",
+        "validation",
+    }
+    kept = []
+    for heading, body in sections:
+        normalized = normalize_heading(heading)
+        if normalized in semantic_headings:
+            kept.append(f"{heading} {body}".strip() if heading else body)
+    return "\n".join(kept) if kept else text
+
+
+def split_markdown_sections(text: str) -> list[tuple[str, str]]:
+    heading_pattern = (
+        r"Trac ticket number|Branch description|Steps to reproduce|Expected behavior|"
+        r"Actual behavior|Test plan|Tests run|AI Assistance Disclosure(?:\s*\([^)]*\))?|"
+        r"Checklist|Backport|Validation|Description|Reproduction|Problem|Summary|Tests"
+    )
+    matches = list(re.finditer(rf"(?:^|\s)(#{{2,6}})\s+({heading_pattern})\b", text, flags=re.IGNORECASE))
+    if not matches:
+        return []
+    sections: list[tuple[str, str]] = []
+    prefix = text[: matches[0].start()].strip()
+    if prefix:
+        sections.append(("", prefix))
+    for index, match in enumerate(matches):
+        heading = match.group(2).strip()
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(text)
+        body = text[start:end].strip()
+        heading, inline_body = split_known_semantic_heading(heading)
+        if inline_body:
+            body = f"{inline_body} {body}".strip()
+        sections.append((heading, body))
+    return sections
+
+
+def split_known_semantic_heading(raw_heading: str) -> tuple[str, str]:
+    lowered = compact_spaces(raw_heading).lower()
+    known = [
+        "trac ticket number",
+        "branch description",
+        "steps to reproduce",
+        "expected behavior",
+        "actual behavior",
+        "test plan",
+        "tests run",
+        "validation",
+        "description",
+        "reproduction",
+        "problem",
+        "summary",
+        "tests",
+    ]
+    for heading in known:
+        if lowered == heading:
+            return raw_heading, ""
+        if lowered.startswith(heading + " "):
+            return heading.title(), raw_heading[len(heading) :].strip(" :-")
+    return raw_heading, ""
+
+
+def normalize_heading(heading: str) -> str:
+    heading = re.sub(r"\([^)]*\)", "", heading)
+    heading = re.sub(r"[^A-Za-z0-9 ]+", " ", heading)
+    return compact_spaces(heading).lower()
+
+
+def is_binary_or_low_signal_diff(diff: str) -> bool:
+    lowered = diff.lower()
+    if "binary files " in lowered or "git binary patch" in lowered:
+        return True
+    files = []
+    for line in diff.splitlines():
+        match = re.match(r"^diff --git a/(.*?) b/(.*?)$", line)
+        if match:
+            files.append(match.group(2).lower())
+    low_signal_suffixes = (
+        ".lock",
+        "package-lock.json",
+        "yarn.lock",
+        "pnpm-lock.yaml",
+        "poetry.lock",
+        "go.sum",
+        ".min.js",
+        ".min.css",
+    )
+    low_signal_parts = ("/vendor/", "/dist/", "/build/", "/generated/", "/migrations/")
+    return bool(files) and all(path.endswith(low_signal_suffixes) or any(part in f"/{path}" for part in low_signal_parts) for path in files)
 
 
 def compact_spaces(text: str) -> str:

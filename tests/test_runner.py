@@ -16,6 +16,7 @@ from agenttrace_sandbox.data_builders import (
     is_bug_fix_record,
     linked_issue_number,
     load_dataset_rows,
+    make_repair_card,
     rows_from_loaded_dataset,
 )
 from agenttrace_sandbox.llm import MockCodingModel
@@ -787,6 +788,22 @@ class RunnerTests(unittest.TestCase):
 
         self.assertEqual(clean_repair_text(text, "keep"), text)
 
+    def test_clean_repair_text_semantic_keeps_repair_sections(self) -> None:
+        text = (
+            "Fixed #1 -- Parser empty input. "
+            "#### Branch description Return None for empty parser input. "
+            "#### Tests Run python -m pytest tests/test_parser.py "
+            "#### AI Assistance Disclosure (REQUIRED) - [x] No AI tools were used. "
+            "#### Checklist - [x] This PR follows the contribution guidelines."
+        )
+
+        cleaned = clean_repair_text(text, "semantic")
+
+        self.assertIn("Return None for empty parser input", cleaned)
+        self.assertIn("python -m pytest tests/test_parser.py", cleaned)
+        self.assertNotIn("AI Assistance Disclosure", cleaned)
+        self.assertNotIn("contribution guidelines", cleaned)
+
     def test_export_repair_corpus_cleans_boilerplate_by_default(self) -> None:
         import tempfile
 
@@ -917,6 +934,47 @@ class RunnerTests(unittest.TestCase):
 
         self.assertFalse(quality["is_bug_fix"])
         self.assertTrue(quality["tests_only"])
+
+    def test_bug_fix_quality_filters_dependency_only(self) -> None:
+        record = {
+            "pr_title": "Fix dependency resolution",
+            "files": ["package-lock.json"],
+            "diff": "diff --git a/package-lock.json b/package-lock.json\n--- a/package-lock.json\n+++ b/package-lock.json\n@@\n-1\n+2",
+        }
+
+        quality = bug_fix_quality(record)
+
+        self.assertFalse(quality["is_bug_fix"])
+        self.assertTrue(quality["dependency_only"])
+
+    def test_repair_card_skips_low_signal_diff_evidence(self) -> None:
+        record = {
+            "id": "owner/repo#10",
+            "repo": "owner/repo",
+            "pr_title": "Fix parser empty input",
+            "pr_body": "#### Branch description Return None for empty parser input.",
+            "issue_number": 10,
+            "diff": (
+                "diff --git a/src/parser.py b/src/parser.py\n"
+                "--- a/src/parser.py\n"
+                "+++ b/src/parser.py\n"
+                "@@\n"
+                "-raise ValueError\n"
+                "+return None\n"
+                "diff --git a/package-lock.json b/package-lock.json\n"
+                "--- a/package-lock.json\n"
+                "+++ b/package-lock.json\n"
+                "@@\n"
+                "-1\n"
+                "+2\n"
+            ),
+        }
+
+        card = make_repair_card(record)
+        evidence_files = {item.get("file") for item in card["evidence"]}
+
+        self.assertIn("src/parser.py", evidence_files)
+        self.assertNotIn("package-lock.json", evidence_files)
 
     def test_strict_sft_export_filters_noisy_traces(self) -> None:
         import tempfile

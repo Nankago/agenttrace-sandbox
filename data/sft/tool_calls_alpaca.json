@@ -1,0 +1,62 @@
+[
+  {
+    "system": "You are a coding agent. Return exactly one safe JSON tool call for the next step.",
+    "instruction": "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON.",
+    "input": "{\n  \"task\": \"Fix the subtract function bug.\",\n  \"plan\": \"Inspect the relevant Python file, make the smallest fix, run tests, then summarize the diff.\",\n  \"history\": []\n}",
+    "output": "{\n  \"tool\": \"list_files\",\n  \"arguments\": {\n    \"path\": \".\"\n  },\n  \"reason\": \"Find project files.\"\n}"
+  },
+  {
+    "system": "You are a coding agent. Return exactly one safe JSON tool call for the next step.",
+    "instruction": "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON.",
+    "input": "{\n  \"task\": \"Fix the subtract function bug.\",\n  \"plan\": \"Inspect the relevant Python file, make the smallest fix, run tests, then summarize the diff.\",\n  \"history\": [\n    {\n      \"tool\": \"list_files\",\n      \"arguments\": {\n        \"path\": \".\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    }\n  ]\n}",
+    "output": "{\n  \"tool\": \"read_file\",\n  \"arguments\": {\n    \"path\": \"calculator.py\"\n  },\n  \"reason\": \"Inspect the calculator implementation.\"\n}"
+  },
+  {
+    "system": "You are a coding agent. Return exactly one safe JSON tool call for the next step.",
+    "instruction": "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON.",
+    "input": "{\n  \"task\": \"Fix the subtract function bug.\",\n  \"plan\": \"Inspect the relevant Python file, make the smallest fix, run tests, then summarize the diff.\",\n  \"history\": [\n    {\n      \"tool\": \"list_files\",\n      \"arguments\": {\n        \"path\": \".\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"read_file\",\n      \"arguments\": {\n        \"path\": \"calculator.py\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    }\n  ]\n}",
+    "output": "{\n  \"tool\": \"replace_in_file\",\n  \"arguments\": {\n    \"path\": \"calculator.py\",\n    \"old\": \"return a + b  # BUG\",\n    \"new\": \"return a - b\"\n  },\n  \"reason\": \"Fix subtract to subtract the second operand.\"\n}"
+  },
+  {
+    "system": "You are a coding agent. Return exactly one safe JSON tool call for the next step.",
+    "instruction": "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON.",
+    "input": "{\n  \"task\": \"Fix the subtract function bug.\",\n  \"plan\": \"Inspect the relevant Python file, make the smallest fix, run tests, then summarize the diff.\",\n  \"history\": [\n    {\n      \"tool\": \"list_files\",\n      \"arguments\": {\n        \"path\": \".\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"read_file\",\n      \"arguments\": {\n        \"path\": \"calculator.py\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"replace_in_file\",\n      \"arguments\": {\n        \"path\": \"calculator.py\",\n        \"old\": \"return a + b  # BUG\",\n        \"new\": \"return a - b\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    }\n  ]\n}",
+    "output": "{\n  \"tool\": \"run_tests\",\n  \"arguments\": {\n    \"command\": \"python3 -m unittest discover -s tests\"\n  },\n  \"reason\": \"Validate the fix.\"\n}"
+  },
+  {
+    "system": "You are a coding agent. Return exactly one safe JSON tool call for the next step.",
+    "instruction": "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON.",
+    "input": "{\n  \"task\": \"Fix the subtract function bug.\",\n  \"plan\": \"Inspect the relevant Python file, make the smallest fix, run tests, then summarize the diff.\",\n  \"history\": [\n    {\n      \"tool\": \"list_files\",\n      \"arguments\": {\n        \"path\": \".\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"read_file\",\n      \"arguments\": {\n        \"path\": \"calculator.py\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"replace_in_file\",\n      \"arguments\": {\n        \"path\": \"calculator.py\",\n        \"old\": \"return a + b  # BUG\",\n        \"new\": \"return a - b\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"run_tests\",\n      \"arguments\": {\n        \"command\": \"python3 -m unittest discover -s tests\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    }\n  ]\n}",
+    "output": "{\n  \"tool\": \"git_diff\",\n  \"arguments\": {},\n  \"reason\": \"Capture final diff.\"\n}"
+  },
+  {
+    "system": "You are a coding agent. Return exactly one safe JSON tool call for the next step.",
+    "instruction": "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON.",
+    "input": "{\n  \"task\": \"Fix the subtract function bug.\",\n  \"plan\": \"Inspect the relevant Python file, make the smallest fix, run tests, then summarize the diff.\",\n  \"history\": []\n}",
+    "output": "{\n  \"tool\": \"list_files\",\n  \"arguments\": {\n    \"path\": \".\"\n  },\n  \"reason\": \"Find project files.\"\n}"
+  },
+  {
+    "system": "You are a coding agent. Return exactly one safe JSON tool call for the next step.",
+    "instruction": "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON.",
+    "input": "{\n  \"task\": \"Fix the subtract function bug.\",\n  \"plan\": \"Inspect the relevant Python file, make the smallest fix, run tests, then summarize the diff.\",\n  \"history\": [\n    {\n      \"tool\": \"list_files\",\n      \"arguments\": {\n        \"path\": \".\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    }\n  ]\n}",
+    "output": "{\n  \"tool\": \"read_file\",\n  \"arguments\": {\n    \"path\": \"calculator.py\"\n  },\n  \"reason\": \"Inspect the calculator implementation.\"\n}"
+  },
+  {
+    "system": "You are a coding agent. Return exactly one safe JSON tool call for the next step.",
+    "instruction": "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON.",
+    "input": "{\n  \"task\": \"Fix the subtract function bug.\",\n  \"plan\": \"Inspect the relevant Python file, make the smallest fix, run tests, then summarize the diff.\",\n  \"history\": [\n    {\n      \"tool\": \"list_files\",\n      \"arguments\": {\n        \"path\": \".\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"read_file\",\n      \"arguments\": {\n        \"path\": \"calculator.py\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    }\n  ]\n}",
+    "output": "{\n  \"tool\": \"replace_in_file\",\n  \"arguments\": {\n    \"path\": \"calculator.py\",\n    \"old\": \"return a + b  # BUG\",\n    \"new\": \"return a - b\"\n  },\n  \"reason\": \"Fix subtract to subtract the second operand.\"\n}"
+  },
+  {
+    "system": "You are a coding agent. Return exactly one safe JSON tool call for the next step.",
+    "instruction": "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON.",
+    "input": "{\n  \"task\": \"Fix the subtract function bug.\",\n  \"plan\": \"Inspect the relevant Python file, make the smallest fix, run tests, then summarize the diff.\",\n  \"history\": [\n    {\n      \"tool\": \"list_files\",\n      \"arguments\": {\n        \"path\": \".\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"read_file\",\n      \"arguments\": {\n        \"path\": \"calculator.py\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"replace_in_file\",\n      \"arguments\": {\n        \"path\": \"calculator.py\",\n        \"old\": \"return a + b  # BUG\",\n        \"new\": \"return a - b\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    }\n  ]\n}",
+    "output": "{\n  \"tool\": \"run_tests\",\n  \"arguments\": {\n    \"command\": \"python3 -m unittest discover -s tests\"\n  },\n  \"reason\": \"Validate the fix.\"\n}"
+  },
+  {
+    "system": "You are a coding agent. Return exactly one safe JSON tool call for the next step.",
+    "instruction": "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON.",
+    "input": "{\n  \"task\": \"Fix the subtract function bug.\",\n  \"plan\": \"Inspect the relevant Python file, make the smallest fix, run tests, then summarize the diff.\",\n  \"history\": [\n    {\n      \"tool\": \"list_files\",\n      \"arguments\": {\n        \"path\": \".\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"read_file\",\n      \"arguments\": {\n        \"path\": \"calculator.py\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"replace_in_file\",\n      \"arguments\": {\n        \"path\": \"calculator.py\",\n        \"old\": \"return a + b  # BUG\",\n        \"new\": \"return a - b\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    },\n    {\n      \"tool\": \"run_tests\",\n      \"arguments\": {\n        \"command\": \"python3 -m unittest discover -s tests\"\n      },\n      \"ok\": true,\n      \"error_type\": \"\"\n    }\n  ]\n}",
+    "output": "{\n  \"tool\": \"git_diff\",\n  \"arguments\": {},\n  \"reason\": \"Capture final diff.\"\n}"
+  }
+]
