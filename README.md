@@ -55,6 +55,10 @@ This is an independent MVP implementation for learning and extension. It is insp
 - Builds unit-test-driven function completion tasks from existing Python repos.
 - Fetches GitHub PR/Issue/diff records into local JSONL.
 - Builds lightweight PR/Issue repair wiki records from local JSONL.
+- Builds evidence-grounded Repair Cards and optional LLM-enriched repair semantics.
+- Exports Repair SFT variants for ablation studies.
+- Exports Repair Corpus JSONL for continued pretraining / mid-training.
+- Summarizes Repair Card quality and grounding signals.
 
 ## Quick Start
 
@@ -344,6 +348,53 @@ python -m agenttrace_sandbox.cli export-repair-sft \
 ```
 
 Each output sample contains `instruction`, `input`, `output`, and metadata with `task_type`, `source_id`, `quality`, and the evidence IDs used for grounding. This is the handoff point from structured repair cards to trainable SFT data.
+
+Summarize repair card quality:
+
+```bash
+python -m agenttrace_sandbox.cli stats-repair-cards \
+  --input data/wiki/django_repair_cards.jsonl
+```
+
+The command also accepts a quoted glob such as `--input "data/wiki/*_repair_cards.jsonl"`. Add `--json` for machine-readable stats. It reports record count, `quality.overall` avg/min/max, test/source evidence ratios, average bug-fix score, optional docs/tests-only counts, LLM grounding quality when present, and derived task counts.
+
+Export continuous repair text for continued pretraining / mid-training:
+
+```bash
+python -m agenttrace_sandbox.cli export-repair-corpus \
+  --input data/wiki/django_enriched_repair_cards.jsonl \
+  --output data/corpus/django_repair_corpus.jsonl \
+  --min-quality 0.7 \
+  --require-grounding
+```
+
+Repair Corpus rows contain `id`, `repo`, a linearized `text` field, and metadata. The text keeps evidence IDs, changed files, symptom, root cause, failure condition, expected behavior, repair rationale, test oracle, edge cases, and quality signals. By default it summarizes diff evidence rather than copying full diffs; use `--max-evidence-chars` to cap snippets and `--include-raw-diff` only when you intentionally want raw diff text.
+
+For ablations, `export-repair-sft` supports:
+
+```bash
+python -m agenttrace_sandbox.cli export-repair-sft \
+  --input data/wiki/django_enriched_repair_cards.jsonl \
+  --output data/sft/repair_sft_no_llm.jsonl \
+  --variant no-llm
+```
+
+Variants:
+
+- `full`: enriched fields plus evidence, the default.
+- `no-llm`: rule-derived Repair Card fields only.
+- `no-tests`: removes test evidence and skips `test_spec`.
+- `diff-only`: weak baseline from PR text and source diff evidence.
+
+A simple experiment ladder is:
+
+- Base Qwen with no project-specific repair data.
+- PR diff only SFT baseline with `--variant diff-only`.
+- Rule Repair Card SFT with `--variant no-llm`.
+- Full LLM Repair Card SFT with `--variant full`.
+- No-tests ablation with `--variant no-tests`.
+
+Terminology note: Repair SFT is post-training instruction data. Repair Corpus is mid-training / continued-pretraining text. Neither one is an agent action-observation trajectory; real trajectories are still the `trace.jsonl` records produced by running the agent.
 
 Run tests inside Docker instead of the host Python environment:
 

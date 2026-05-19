@@ -22,7 +22,7 @@ from agenttrace_sandbox.llm import MockCodingModel
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
 from agenttrace_sandbox.sandbox import build_docker_command
-from agenttrace_sandbox.sft_export import export_repair_sft, export_sft
+from agenttrace_sandbox.sft_export import export_repair_corpus, export_repair_sft, export_sft, make_repair_sft_sample, stats_repair_cards
 from agenttrace_sandbox.stats import compute_manifest_stats, compute_run_stats
 
 
@@ -68,6 +68,7 @@ def sample_enriched_repair_card() -> dict:
     return {
         "id": "owner/repo#7",
         "repo": "owner/repo",
+        "source_record": {"pr_number": 7, "pr_url": "https://github.com/owner/repo/pull/7", "issue_number": 5},
         "source_files": ["src/parser.py"],
         "test_files": ["tests/test_parser.py"],
         "evidence": [
@@ -87,7 +88,7 @@ def sample_enriched_repair_card() -> dict:
                 "output": "Update src/parser.py so empty input returns None and the relevant tests pass.",
             }
         },
-        "quality": {"overall": 0.9},
+        "quality": {"overall": 0.9, "has_test_evidence": True, "has_source_patch": True, "bug_fix_score": 4.0},
         "llm_repair_card": {
             "root_cause": {"text": "The parser raises ValueError for empty input.", "evidence_ids": ["E1", "E2"]},
             "failure_condition": {"text": "Calling parse with an empty string triggers the bug.", "evidence_ids": ["E1"]},
@@ -95,7 +96,7 @@ def sample_enriched_repair_card() -> dict:
             "repair_rationale": {"text": "Returning None avoids raising ValueError for the covered case.", "evidence_ids": ["E2", "E3"]},
             "edge_cases": [{"text": "Empty string input is the regression case.", "evidence_ids": ["E3"]}],
         },
-        "llm_quality": {"grounding_ok": True},
+        "llm_quality": {"valid_json": True, "grounding_ok": True, "field_coverage": 1.0},
     }
 
 
@@ -686,6 +687,130 @@ class RunnerTests(unittest.TestCase):
 
             self.assertEqual(count, 0)
             self.assertEqual(output.read_text(encoding="utf-8"), "")
+
+    def test_stats_repair_cards_basic_quality(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "cards.jsonl"
+            card = sample_enriched_repair_card()
+            card.pop("llm_repair_card")
+            card.pop("llm_quality")
+            source.write_text(json.dumps(card) + "\n", encoding="utf-8")
+
+            stats = stats_repair_cards(source)
+
+            self.assertEqual(stats["records"], 1)
+            self.assertEqual(stats["quality"]["avg"], 0.9)
+            self.assertEqual(stats["has_test_evidence"]["count"], 1)
+            self.assertEqual(stats["has_source_patch"]["count"], 1)
+            self.assertEqual(stats["avg_bug_fix_score"], 4.0)
+            self.assertEqual(stats["derived_tasks"]["repair_instruction"], 1)
+            self.assertNotIn("llm_quality", stats)
+
+    def test_stats_repair_cards_enriched_quality(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "enriched_cards.jsonl"
+            source.write_text(json.dumps(sample_enriched_repair_card()) + "\n", encoding="utf-8")
+
+            stats = stats_repair_cards(source)
+
+            self.assertEqual(stats["llm_quality"]["valid_json"]["count"], 1)
+            self.assertEqual(stats["llm_quality"]["grounding_ok"]["count"], 1)
+            self.assertEqual(stats["llm_quality"]["avg_field_coverage"], 1.0)
+
+    def test_export_repair_corpus_writes_linearized_text(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "enriched_cards.jsonl"
+            source.write_text(json.dumps(sample_enriched_repair_card()) + "\n", encoding="utf-8")
+            output = root / "corpus.jsonl"
+
+            count = export_repair_corpus(source, output, min_quality=0.7, require_grounding=True)
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+            text = rows[0]["text"]
+
+            self.assertEqual(count, 1)
+            self.assertIn("[E1: issue_text", text)
+            self.assertIn("Root Cause: The parser raises ValueError for empty input.", text)
+            self.assertIn("Test Oracle: tests/test_parser.py: added lines=1, removed lines=0", text)
+            self.assertNotIn("-raise ValueError", text)
+            self.assertEqual(rows[0]["metadata"]["grounding_ok"], True)
+
+    def test_export_repair_corpus_filters_quality_and_grounding(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "enriched_cards.jsonl"
+            low_quality = sample_enriched_repair_card()
+            low_quality["quality"]["overall"] = 0.2
+            ungrounded = sample_enriched_repair_card()
+            ungrounded["id"] = "owner/repo#8"
+            ungrounded["llm_quality"]["grounding_ok"] = False
+            good = sample_enriched_repair_card()
+            good["id"] = "owner/repo#9"
+            source.write_text("\n".join(json.dumps(card) for card in [low_quality, ungrounded, good]) + "\n", encoding="utf-8")
+            output = root / "corpus.jsonl"
+
+            count = export_repair_corpus(source, output, min_quality=0.7, require_grounding=True)
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual(count, 1)
+            self.assertEqual(rows[0]["id"], "owner/repo#9")
+
+    def test_export_repair_sft_no_llm_variant_uses_rule_card(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "cards.jsonl"
+            card = sample_enriched_repair_card()
+            card.pop("llm_repair_card")
+            source.write_text(json.dumps(card) + "\n", encoding="utf-8")
+            output = root / "repair_sft.jsonl"
+
+            count = export_repair_sft(source, output, tasks=["repair_rationale", "repair_instruction"], variant="no-llm")
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+
+            self.assertEqual(count, 2)
+            self.assertIn("src/parser.py: added lines=1, removed lines=1", rows[0]["output"])
+            self.assertEqual(rows[0]["metadata"]["variant"], "no-llm")
+
+    def test_export_repair_sft_no_tests_variant_skips_test_spec_and_test_evidence(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "cards.jsonl"
+            source.write_text(json.dumps(sample_enriched_repair_card()) + "\n", encoding="utf-8")
+            output = root / "repair_sft.jsonl"
+
+            count = export_repair_sft(source, output, variant="no-tests")
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+            task_types = {row["metadata"]["task_type"] for row in rows}
+
+            self.assertEqual(count, 4)
+            self.assertNotIn("test_spec", task_types)
+            self.assertTrue(all("test_diff" not in row["input"]["evidence"] for row in rows))
+            localization = next(row for row in rows if row["metadata"]["task_type"] == "localize_files")
+            self.assertEqual(localization["output"]["test_files"], [])
+
+    def test_repair_instruction_is_specific(self) -> None:
+        card = sample_enriched_repair_card()
+
+        sample = make_repair_sft_sample(card, "repair_instruction")
+
+        self.assertIsNotNone(sample)
+        self.assertIn("src/parser.py", sample["output"])
+        self.assertIn("raises ValueError for empty input", sample["output"])
+        self.assertNotIn("behavior described by the issue is fixed", sample["output"])
 
     def test_linked_issue_number(self) -> None:
         self.assertEqual(linked_issue_number("Fixed #37102"), 37102)

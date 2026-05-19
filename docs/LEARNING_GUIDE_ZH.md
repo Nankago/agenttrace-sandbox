@@ -74,6 +74,9 @@ AgentTrace Sandbox 的核心就是把这些过程系统性记录下来。
 | Unit Test 补全构建 | 从已有 Python repo 的测试 import 中挖空函数，生成补全任务 |
 | GitHub 自动抓取 | 从 GitHub repo 抓取 PR、关联 issue 和 diff |
 | PR/Issue Wiki | 把 PR/Issue/diff JSONL 转成结构化修复解释数据 |
+| Repair Card 统计 | 统计质量分、测试证据、源码 patch 和 LLM grounding |
+| Repair Corpus 导出 | 把 Repair Card 线性化为中训练 / continued pretraining 文本 |
+| Repair SFT 变体 | 支持 full、no-llm、no-tests、diff-only ablation |
 
 ## 4. 快速跑通
 
@@ -410,6 +413,69 @@ PYTHONPATH=src python3 -m agenttrace_sandbox.cli export-repair-sft \
 ```
 
 每条 SFT 样本包含 `instruction`、`input`、`output`，metadata 里保留 `task_type`、`source_id`、`quality` 和引用的 evidence IDs。这一步就是从结构化 Repair Card 到可训练 SFT 数据的出口。
+
+统计 Repair Card 质量：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli stats-repair-cards \
+  --input data/wiki/django_repair_cards.jsonl
+```
+
+也可以传 glob，例如：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli stats-repair-cards \
+  --input "data/wiki/*_repair_cards.jsonl" \
+  --json
+```
+
+输出会包含记录数、`quality.overall` 的 avg/min/max、有测试证据比例、有源码 patch 比例、平均 `bug_fix_score`、可选的 `docs_only` / `tests_only`，如果有 `llm_quality` 还会统计 `valid_json`、`grounding_ok` 和平均 `field_coverage`。
+
+导出中训练语料 Repair Corpus：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli export-repair-corpus \
+  --input data/wiki/django_enriched_repair_cards.jsonl \
+  --output data/corpus/django_repair_corpus.jsonl \
+  --min-quality 0.7 \
+  --require-grounding
+```
+
+这个输出不是 instruction/input/output，而是连续文本 JSONL。每行包含 `id`、`repo`、`text` 和 `metadata`。`text` 会线性化 Repository、PR、Issue、Problem Summary、带 evidence id 的证据、源码文件、测试文件、Symptom、Root Cause、Failure Condition、Expected Behavior、Patch Intent / Repair Rationale、Test Oracle、Edge Cases 和质量信号。默认不会把巨大 diff 原样塞进文本，只保留摘要；可以用 `--max-evidence-chars` 控制证据长度，只有明确需要时才使用 `--include-raw-diff`。
+
+导出 Repair SFT 时可以做 ablation：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli export-repair-sft \
+  --input data/wiki/django_enriched_repair_cards.jsonl \
+  --output data/sft/django_repair_sft_no_llm.jsonl \
+  --variant no-llm
+```
+
+四个变体：
+
+| variant | 含义 |
+|---|---|
+| `full` | 默认，优先使用 LLM enriched fields 和 evidence |
+| `no-llm` | 只使用规则构建的 `repair_card` / `derived_tasks` |
+| `no-tests` | 移除 test evidence，并跳过 `test_spec` |
+| `diff-only` | 只用 PR 文本和源码 diff 做弱 baseline |
+
+推荐实验设计：
+
+| 实验 | 目的 |
+|---|---|
+| Base Qwen | 没有项目修复数据的基线 |
+| PR diff only | 只看 PR/diff 弱监督能带来多少收益 |
+| Rule Repair Card / no-llm | 验证规则结构化 Repair Card 的价值 |
+| Full LLM Repair Card | 验证 LLM enriched root cause/rationale 的收益 |
+| No-tests ablation | 验证测试证据对修复能力的贡献 |
+
+概念上要分清楚：
+
+- Repair SFT 是后训练 instruction 数据。
+- Repair Corpus 是中训练 / continued pretraining 数据。
+- 这两者都还不是 agent action-observation trajectory；真正的 agent 轨迹仍然是 runner 产生的 `trace.jsonl`。
 
 ## 5. 接真实 API 怎么理解
 

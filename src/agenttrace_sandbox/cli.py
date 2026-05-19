@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
 from agenttrace_sandbox.config import AgentConfig
@@ -17,7 +18,7 @@ from agenttrace_sandbox.data_builders import (
 from agenttrace_sandbox.llm import MockCodingModel, OpenAICompatibleChat
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
-from agenttrace_sandbox.sft_export import export_repair_sft, export_sft
+from agenttrace_sandbox.sft_export import export_repair_corpus, export_repair_sft, export_sft, render_repair_card_stats, stats_repair_cards
 from agenttrace_sandbox.stats import compute_manifest_stats, compute_run_stats
 
 
@@ -86,6 +87,20 @@ def main() -> None:
     )
     repair_sft_parser.add_argument("--min-quality", type=float, default=0.0)
     repair_sft_parser.add_argument("--require-grounding", action="store_true")
+    repair_sft_parser.add_argument("--variant", choices=["full", "no-tests", "no-llm", "diff-only"], default="full")
+
+    repair_corpus_parser = sub.add_parser("export-repair-corpus", help="Export repair cards as mid-training continuous text JSONL.")
+    repair_corpus_parser.add_argument("--input", required=True, type=Path)
+    repair_corpus_parser.add_argument("--output", default=Path("data/corpus/repair_corpus.jsonl"), type=Path)
+    repair_corpus_parser.add_argument("--min-quality", type=float, default=0.0)
+    repair_corpus_parser.add_argument("--require-grounding", action="store_true")
+    repair_corpus_parser.add_argument("--format", choices=["jsonl"], default="jsonl")
+    repair_corpus_parser.add_argument("--max-evidence-chars", type=int, default=1200)
+    repair_corpus_parser.add_argument("--include-raw-diff", action="store_true")
+
+    repair_card_stats_parser = sub.add_parser("stats-repair-cards", help="Summarize repair card JSONL quality and grounding.")
+    repair_card_stats_parser.add_argument("--input", required=True, type=Path)
+    repair_card_stats_parser.add_argument("--json", action="store_true")
 
     stats_parser = sub.add_parser("stats", help="Summarize run traces.")
     stats_parser.add_argument("--runs", default=Path("runs"), type=Path)
@@ -180,8 +195,25 @@ def main() -> None:
         print(f"wrote {count} samples to {args.output}")
     elif args.command == "export-repair-sft":
         tasks = [task.strip() for task in args.tasks.split(",") if task.strip()]
-        count = export_repair_sft(args.input, args.output, tasks=tasks, min_quality=args.min_quality, require_grounding=args.require_grounding)
+        count = export_repair_sft(args.input, args.output, tasks=tasks, min_quality=args.min_quality, require_grounding=args.require_grounding, variant=args.variant)
         print(f"wrote {count} samples to {args.output}")
+    elif args.command == "export-repair-corpus":
+        count = export_repair_corpus(
+            args.input,
+            args.output,
+            min_quality=args.min_quality,
+            require_grounding=args.require_grounding,
+            output_format=args.format,
+            max_evidence_chars=args.max_evidence_chars,
+            include_raw_diff=args.include_raw_diff,
+        )
+        print(f"wrote {count} records to {args.output}")
+    elif args.command == "stats-repair-cards":
+        stats = stats_repair_cards(args.input)
+        if args.json:
+            print(json.dumps(stats, ensure_ascii=False, indent=2))
+        else:
+            print(render_repair_card_stats(stats))
     elif args.command == "stats":
         if args.manifest_results:
             print(compute_manifest_stats(args.manifest_results).render())

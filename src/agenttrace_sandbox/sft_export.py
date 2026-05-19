@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import glob
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,7 @@ from agenttrace_sandbox.tracing import read_jsonl
 SYSTEM_PROMPT = "You are a coding agent. Return exactly one safe JSON tool call for the next step."
 SFT_INSTRUCTION = "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON."
 REPAIR_SFT_TASKS = {"localize_files", "explain_bug", "repair_rationale", "test_spec", "repair_instruction"}
+REPAIR_SFT_VARIANTS = {"full", "no-tests", "no-llm", "diff-only"}
 
 
 def export_sft(
@@ -36,15 +39,41 @@ def export_repair_sft(
     tasks: list[str] | None = None,
     min_quality: float = 0.0,
     require_grounding: bool = False,
+    variant: str = "full",
 ) -> int:
+    if variant not in REPAIR_SFT_VARIANTS:
+        raise ValueError(f"unknown repair SFT variant: {variant}")
     selected_tasks = tasks or sorted(REPAIR_SFT_TASKS)
     unknown = [task for task in selected_tasks if task not in REPAIR_SFT_TASKS]
     if unknown:
         raise ValueError(f"unknown repair SFT task(s): {', '.join(unknown)}")
-    samples = collect_repair_sft_samples(input_path, selected_tasks, min_quality=min_quality, require_grounding=require_grounding)
+    samples = collect_repair_sft_samples(input_path, selected_tasks, min_quality=min_quality, require_grounding=require_grounding, variant=variant)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_jsonl(samples, output_path)
     return len(samples)
+
+
+def export_repair_corpus(
+    input_path: Path,
+    output_path: Path,
+    min_quality: float = 0.0,
+    require_grounding: bool = False,
+    output_format: str = "jsonl",
+    max_evidence_chars: int = 1200,
+    include_raw_diff: bool = False,
+) -> int:
+    if output_format != "jsonl":
+        raise ValueError(f"unsupported repair corpus format: {output_format}")
+    rows = collect_repair_corpus_records(
+        input_path,
+        min_quality=min_quality,
+        require_grounding=require_grounding,
+        max_evidence_chars=max_evidence_chars,
+        include_raw_diff=include_raw_diff,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl(rows, output_path)
+    return len(rows)
 
 
 def collect_repair_sft_samples(
@@ -52,6 +81,7 @@ def collect_repair_sft_samples(
     tasks: list[str],
     min_quality: float = 0.0,
     require_grounding: bool = False,
+    variant: str = "full",
 ) -> list[dict[str, Any]]:
     samples: list[dict[str, Any]] = []
     for card in read_jsonl(input_path):
@@ -59,26 +89,26 @@ def collect_repair_sft_samples(
         if quality < min_quality:
             continue
         for task in tasks:
-            sample = make_repair_sft_sample(card, task, require_grounding=require_grounding)
+            sample = make_repair_sft_sample(card, task, require_grounding=require_grounding, variant=variant)
             if sample:
                 samples.append(sample)
     return samples
 
 
-def make_repair_sft_sample(card: dict[str, Any], task: str, require_grounding: bool = False) -> dict[str, Any] | None:
-    evidence = card.get("evidence", [])
+def make_repair_sft_sample(card: dict[str, Any], task: str, require_grounding: bool = False, variant: str = "full") -> dict[str, Any] | None:
+    evidence = variant_evidence(card.get("evidence", []), variant)
     evidence_text = format_repair_evidence(evidence)
     source_id = str(card.get("id", ""))
     repo = str(card.get("repo", ""))
     quality = float(card.get("quality", {}).get("overall", 0))
-    llm_card = card.get("llm_repair_card", {}) if isinstance(card.get("llm_repair_card"), dict) else {}
+    llm_card = card.get("llm_repair_card", {}) if variant == "full" and isinstance(card.get("llm_repair_card"), dict) else {}
     repair_card = card.get("repair_card", {}) if isinstance(card.get("repair_card"), dict) else {}
 
     if task == "localize_files":
         localization = repair_card.get("localization", {}) if isinstance(repair_card.get("localization"), dict) else {}
         output = {
             "source_files": localization.get("source_files", card.get("source_files", [])),
-            "test_files": localization.get("test_files", card.get("test_files", [])),
+            "test_files": [] if variant in {"no-tests", "diff-only"} else localization.get("test_files", card.get("test_files", [])),
         }
         evidence_ids = list(localization.get("evidence_ids", [])) if isinstance(localization.get("evidence_ids", []), list) else []
         instruction = "Identify the source and test files involved in fixing the bug."
@@ -91,6 +121,8 @@ def make_repair_sft_sample(card: dict[str, Any], task: str, require_grounding: b
             evidence_ids = list(symptom.get("evidence_ids", [])) if isinstance(symptom.get("evidence_ids", []), list) else []
         else:
             evidence_ids = claim_evidence_ids([claim for claim in claims if isinstance(claim, dict)])
+        if variant == "diff-only":
+            output, evidence_ids = diff_only_bug_summary(evidence)
         instruction = "Explain the bug using only the provided evidence."
     elif task == "repair_rationale":
         claim = llm_card.get("repair_rationale")
@@ -103,6 +135,8 @@ def make_repair_sft_sample(card: dict[str, Any], task: str, require_grounding: b
             evidence_ids = list(patch_intent.get("evidence_ids", [])) if isinstance(patch_intent.get("evidence_ids", []), list) else []
         instruction = "Describe why the patch fixes the bug."
     elif task == "test_spec":
+        if variant in {"no-tests", "diff-only"}:
+            return None
         expected = llm_card.get("expected_behavior")
         edge_cases = llm_card.get("edge_cases", []) if isinstance(llm_card.get("edge_cases"), list) else []
         parts = []
@@ -117,11 +151,8 @@ def make_repair_sft_sample(card: dict[str, Any], task: str, require_grounding: b
             evidence_ids = list(test_oracle.get("evidence_ids", [])) if isinstance(test_oracle.get("evidence_ids", []), list) else []
         instruction = "Summarize the expected behavior and edge cases from the test evidence."
     elif task == "repair_instruction":
-        derived = card.get("derived_tasks", {}) if isinstance(card.get("derived_tasks"), dict) else {}
-        repair_instruction = derived.get("repair_instruction", {}) if isinstance(derived.get("repair_instruction"), dict) else {}
-        output = str(repair_instruction.get("output", ""))
-        localization = repair_card.get("localization", {}) if isinstance(repair_card.get("localization"), dict) else {}
-        evidence_ids = list(localization.get("evidence_ids", [])) if isinstance(localization.get("evidence_ids", []), list) else []
+        output = build_repair_instruction(card, repair_card, llm_card, variant=variant)
+        evidence_ids = repair_instruction_evidence_ids(repair_card, llm_card)
         instruction = "Write a concise repair instruction for a coding agent."
     else:
         return None
@@ -130,6 +161,8 @@ def make_repair_sft_sample(card: dict[str, Any], task: str, require_grounding: b
         return None
     valid_ids = {str(item.get("id")) for item in evidence if item.get("id")}
     evidence_ids = [str(item) for item in evidence_ids if str(item)]
+    if variant in {"no-tests", "diff-only"}:
+        evidence_ids = [item for item in evidence_ids if item in valid_ids]
     grounding_ok = bool(evidence_ids) and all(item in valid_ids for item in evidence_ids)
     if require_grounding and not grounding_ok:
         return None
@@ -148,8 +181,178 @@ def make_repair_sft_sample(card: dict[str, Any], task: str, require_grounding: b
             "quality": quality,
             "evidence_ids": evidence_ids,
             "grounding_ok": grounding_ok,
+            "variant": variant,
         },
     }
+
+
+def collect_repair_corpus_records(
+    input_path: Path,
+    min_quality: float = 0.0,
+    require_grounding: bool = False,
+    max_evidence_chars: int = 1200,
+    include_raw_diff: bool = False,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for card in read_jsonl(input_path):
+        quality = float(card.get("quality", {}).get("overall", 0))
+        llm_quality = card.get("llm_quality", {}) if isinstance(card.get("llm_quality"), dict) else {}
+        grounding_ok = bool(llm_quality.get("grounding_ok"))
+        if quality < min_quality:
+            continue
+        if require_grounding and not grounding_ok:
+            continue
+        rows.append(make_repair_corpus_record(card, max_evidence_chars=max_evidence_chars, include_raw_diff=include_raw_diff))
+    return rows
+
+
+def make_repair_corpus_record(card: dict[str, Any], max_evidence_chars: int = 1200, include_raw_diff: bool = False) -> dict[str, Any]:
+    quality = card.get("quality", {}) if isinstance(card.get("quality"), dict) else {}
+    llm_quality = card.get("llm_quality", {}) if isinstance(card.get("llm_quality"), dict) else {}
+    return {
+        "id": str(card.get("id", "")),
+        "repo": str(card.get("repo", "")),
+        "text": repair_corpus_text(card, max_evidence_chars=max_evidence_chars, include_raw_diff=include_raw_diff),
+        "metadata": {
+            "quality": quality.get("overall", 0),
+            "bug_fix_score": quality.get("bug_fix_score", 0),
+            "has_test_evidence": bool(quality.get("has_test_evidence")),
+            "grounding_ok": bool(llm_quality.get("grounding_ok")),
+        },
+    }
+
+
+def repair_corpus_text(card: dict[str, Any], max_evidence_chars: int = 1200, include_raw_diff: bool = False) -> str:
+    repair_card = card.get("repair_card", {}) if isinstance(card.get("repair_card"), dict) else {}
+    llm_card = card.get("llm_repair_card", {}) if isinstance(card.get("llm_repair_card"), dict) else {}
+    source_record = card.get("source_record", {}) if isinstance(card.get("source_record"), dict) else {}
+    quality = card.get("quality", {}) if isinstance(card.get("quality"), dict) else {}
+    llm_quality = card.get("llm_quality", {}) if isinstance(card.get("llm_quality"), dict) else {}
+
+    symptom = repair_claim_text(repair_card, "symptom")
+    patch_intent = repair_claim_text(repair_card, "patch_intent")
+    test_oracle = repair_claim_text(repair_card, "test_oracle")
+    validation = repair_claim_text(repair_card, "validation")
+    root_cause = claim_text(llm_card.get("root_cause")) or symptom
+    failure_condition = claim_text(llm_card.get("failure_condition")) or symptom
+    expected_behavior = claim_text(llm_card.get("expected_behavior")) or test_oracle
+    rationale = claim_text(llm_card.get("repair_rationale")) or patch_intent
+    edge_cases = [claim_text(item) for item in llm_card.get("edge_cases", []) if claim_text(item)] if isinstance(llm_card.get("edge_cases"), list) else []
+
+    parts = [
+        f"Repository: {card.get('repo', '')}",
+        f"PR: {source_record.get('pr_number', '')} {source_record.get('pr_url', '')}".rstrip(),
+        f"Issue: {source_record.get('issue_number', '')}".rstrip(),
+        f"Problem Summary: {symptom}",
+        "Evidence:\n" + corpus_evidence_text(card.get("evidence", []), max_evidence_chars=max_evidence_chars, include_raw_diff=include_raw_diff),
+        "Changed source files: " + join_values(card.get("source_files", [])),
+        "Changed test files: " + join_values(card.get("test_files", [])),
+        f"Symptom: {symptom}",
+        f"Root Cause: {root_cause}",
+        f"Failure Condition: {failure_condition}",
+        f"Expected Behavior: {expected_behavior}",
+        f"Patch Intent / Repair Rationale: {rationale}",
+        f"Test Oracle: {test_oracle}",
+        "Edge Cases: " + (join_values(edge_cases) if edge_cases else "insufficient_evidence"),
+        "Validation / Quality signals: "
+        + join_values(
+            [
+                f"quality.overall={quality.get('overall', 0)}",
+                f"bug_fix_score={quality.get('bug_fix_score', 0)}",
+                f"has_test_evidence={bool(quality.get('has_test_evidence'))}",
+                f"has_source_patch={bool(quality.get('has_source_patch'))}",
+                f"llm_grounding_ok={bool(llm_quality.get('grounding_ok'))}",
+                validation,
+            ]
+        ),
+    ]
+    return redact_secrets("\n\n".join(part for part in parts if part.strip()))
+
+
+def corpus_evidence_text(evidence: Any, max_evidence_chars: int, include_raw_diff: bool) -> str:
+    if not isinstance(evidence, list):
+        return ""
+    chunks: list[str] = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        text = str(item.get("text", ""))
+        if item.get("type") in {"source_diff", "test_diff", "other_diff"} and not include_raw_diff:
+            text = summarize_evidence_diff(text)
+        else:
+            text = text[:max_evidence_chars]
+        file = f" {item.get('file')}" if item.get("file") else ""
+        chunks.append(f"- [{item.get('id')}: {item.get('type')}{file}] {text}")
+    return "\n".join(chunks)
+
+
+def stats_repair_cards(input_pattern: Path | str) -> dict[str, Any]:
+    paths = repair_card_paths(input_pattern)
+    records = [record for path in paths for record in read_jsonl(path)]
+    qualities = [float(record.get("quality", {}).get("overall", 0)) for record in records]
+    bug_scores = [float(record.get("quality", {}).get("bug_fix_score", 0)) for record in records]
+    result: dict[str, Any] = {
+        "files": [str(path) for path in paths],
+        "records": len(records),
+        "quality": {
+            "avg": round(sum(qualities) / len(qualities), 3) if qualities else 0.0,
+            "min": min(qualities) if qualities else 0.0,
+            "max": max(qualities) if qualities else 0.0,
+        },
+        "has_test_evidence": count_ratio(records, lambda record: bool(record.get("quality", {}).get("has_test_evidence"))),
+        "has_source_patch": count_ratio(records, lambda record: bool(record.get("quality", {}).get("has_source_patch"))),
+        "avg_bug_fix_score": round(sum(bug_scores) / len(bug_scores), 3) if bug_scores else 0.0,
+        "derived_tasks": {},
+    }
+    for field in ("docs_only", "tests_only"):
+        if any(field in record for record in records):
+            result[field] = count_ratio(records, lambda record, key=field: bool(record.get(key)))
+    llm_records = [record for record in records if isinstance(record.get("llm_quality"), dict)]
+    if llm_records:
+        coverages = [float(record.get("llm_quality", {}).get("field_coverage", 0)) for record in llm_records]
+        result["llm_quality"] = {
+            "valid_json": count_ratio(llm_records, lambda record: bool(record.get("llm_quality", {}).get("valid_json"))),
+            "grounding_ok": count_ratio(llm_records, lambda record: bool(record.get("llm_quality", {}).get("grounding_ok"))),
+            "avg_field_coverage": round(sum(coverages) / len(coverages), 3) if coverages else 0.0,
+        }
+    task_counts: dict[str, int] = {}
+    for record in records:
+        derived = record.get("derived_tasks", {})
+        if isinstance(derived, dict):
+            for task in derived:
+                task_counts[str(task)] = task_counts.get(str(task), 0) + 1
+    result["derived_tasks"] = dict(sorted(task_counts.items()))
+    return result
+
+
+def render_repair_card_stats(stats: dict[str, Any]) -> str:
+    lines = [
+        f"files={len(stats.get('files', []))}",
+        f"records={stats.get('records', 0)}",
+        "quality.overall="
+        f"avg={stats.get('quality', {}).get('avg', 0)} "
+        f"min={stats.get('quality', {}).get('min', 0)} "
+        f"max={stats.get('quality', {}).get('max', 0)}",
+        render_count_ratio("has_test_evidence", stats.get("has_test_evidence", {})),
+        render_count_ratio("has_source_patch", stats.get("has_source_patch", {})),
+        f"avg_bug_fix_score={stats.get('avg_bug_fix_score', 0)}",
+    ]
+    for key in ("docs_only", "tests_only"):
+        if key in stats:
+            lines.append(render_count_ratio(key, stats.get(key, {})))
+    if "llm_quality" in stats:
+        llm = stats["llm_quality"]
+        lines.extend(
+            [
+                render_count_ratio("llm.valid_json", llm.get("valid_json", {})),
+                render_count_ratio("llm.grounding_ok", llm.get("grounding_ok", {})),
+                f"llm.avg_field_coverage={llm.get('avg_field_coverage', 0)}",
+            ]
+        )
+    derived = stats.get("derived_tasks", {})
+    if derived:
+        lines.append("derived_tasks=" + ", ".join(f"{task}:{count}" for task, count in derived.items()))
+    return "\n".join(lines)
 
 
 def collect_sft_samples(trace_path: Path, strict: bool = False, clean_steps: bool = False, reject_test_edits: bool = False) -> list[dict[str, Any]]:
@@ -307,6 +510,139 @@ def claim_evidence_ids(claims: list[dict[str, Any]]) -> list[str]:
             if evidence_id and evidence_id not in ids:
                 ids.append(evidence_id)
     return ids
+
+
+def variant_evidence(evidence: Any, variant: str) -> list[dict[str, Any]]:
+    if not isinstance(evidence, list):
+        return []
+    allowed = None
+    if variant == "diff-only":
+        allowed = {"pr_text", "source_diff", "other_diff"}
+    elif variant == "no-tests":
+        allowed = {"issue_text", "pr_text", "source_diff", "other_diff"}
+    rows: list[dict[str, Any]] = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        if allowed is not None and item.get("type") not in allowed:
+            continue
+        rows.append(item)
+    return rows
+
+
+def build_repair_instruction(card: dict[str, Any], repair_card: dict[str, Any], llm_card: dict[str, Any], variant: str = "full") -> str:
+    source_files = card.get("source_files", [])
+    if not source_files and isinstance(repair_card.get("localization"), dict):
+        source_files = repair_card["localization"].get("source_files", [])
+    target = join_values(source_files[:5]) if isinstance(source_files, list) and source_files else "the affected source files"
+    root_cause = claim_text(llm_card.get("root_cause"))
+    failure = claim_text(llm_card.get("failure_condition"))
+    expected = claim_text(llm_card.get("expected_behavior"))
+    rationale = claim_text(llm_card.get("repair_rationale"))
+
+    if variant == "diff-only":
+        summary, _ids = diff_only_bug_summary(variant_evidence(card.get("evidence", []), variant))
+        return f"Update {target} according to the PR/source diff evidence. Preserve the intended source behavior: {summary}".strip()
+
+    details = [text for text in [root_cause, failure, expected, rationale] if text]
+    if details:
+        first = details[0]
+        rest = " ".join(details[1:3])
+        suffix = f" {rest}" if rest else ""
+        return f"Fix {target}: {first}.{suffix}".strip()
+
+    derived = card.get("derived_tasks", {}) if isinstance(card.get("derived_tasks"), dict) else {}
+    repair_instruction = derived.get("repair_instruction", {}) if isinstance(derived.get("repair_instruction"), dict) else {}
+    return str(repair_instruction.get("output", ""))
+
+
+def repair_instruction_evidence_ids(repair_card: dict[str, Any], llm_card: dict[str, Any]) -> list[str]:
+    claims = [
+        llm_card.get("root_cause"),
+        llm_card.get("failure_condition"),
+        llm_card.get("expected_behavior"),
+        llm_card.get("repair_rationale"),
+    ]
+    ids = claim_evidence_ids([claim for claim in claims if isinstance(claim, dict)])
+    if ids:
+        return ids
+    localization = repair_card.get("localization", {}) if isinstance(repair_card.get("localization"), dict) else {}
+    values = localization.get("evidence_ids", [])
+    return list(values) if isinstance(values, list) else []
+
+
+def diff_only_bug_summary(evidence: list[dict[str, Any]]) -> tuple[str, list[str]]:
+    ids: list[str] = []
+    parts: list[str] = []
+    for item in evidence:
+        evidence_id = str(item.get("id", ""))
+        if evidence_id:
+            ids.append(evidence_id)
+        if item.get("type") == "pr_text":
+            text = str(item.get("text", "")).strip()
+            if text:
+                parts.append(text[:300])
+        elif item.get("type") in {"source_diff", "other_diff"}:
+            file = str(item.get("file", ""))
+            parts.append(f"{file}: {summarize_evidence_diff(str(item.get('text', '')))}".strip())
+    return (" ".join(parts).strip() or "Use the PR and source diff evidence to infer the repair.", ids)
+
+
+def repair_claim_text(container: dict[str, Any], key: str) -> str:
+    value = container.get(key)
+    return claim_text(value)
+
+
+def claim_text(value: Any) -> str:
+    if usable_claim(value):
+        return str(value.get("text", ""))
+    return ""
+
+
+def summarize_evidence_diff(diff: str) -> str:
+    added = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    removed = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
+    files = []
+    for line in diff.splitlines():
+        match = re.match(r"^diff --git a/(.*?) b/(.*?)$", line)
+        if match:
+            files.append(match.group(2))
+    file_text = f"files={join_values(files)}; " if files else ""
+    return f"{file_text}added lines={added}, removed lines={removed}"
+
+
+def repair_card_paths(input_pattern: Path | str) -> list[Path]:
+    pattern = str(input_pattern)
+    paths = [Path(path) for path in glob.glob(pattern)] if any(char in pattern for char in "*?[]") else [Path(pattern)]
+    return sorted(paths)
+
+
+def count_ratio(records: list[dict[str, Any]], predicate: Any) -> dict[str, Any]:
+    count = sum(1 for record in records if predicate(record))
+    total = len(records)
+    return {"count": count, "ratio": round(count / total, 3) if total else 0.0}
+
+
+def render_count_ratio(name: str, value: dict[str, Any]) -> str:
+    return f"{name}={value.get('count', 0)} ratio={value.get('ratio', 0)}"
+
+
+def join_values(values: Any) -> str:
+    if not isinstance(values, list):
+        return str(values) if values else ""
+    return ", ".join(str(value) for value in values if str(value))
+
+
+def redact_secrets(text: str) -> str:
+    patterns = [
+        r"sk-[A-Za-z0-9_-]{12,}",
+        r"(?:ghp|github_pat|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{12,}",
+        r"Bearer\s+[A-Za-z0-9._-]{16,}",
+    ]
+    redacted = text
+    for pattern in patterns:
+        redacted = re.sub(pattern, "[REDACTED]", redacted)
+    return redacted
 
 
 def write_jsonl(samples: list[dict[str, Any]], output_path: Path) -> None:
