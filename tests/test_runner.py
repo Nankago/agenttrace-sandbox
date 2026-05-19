@@ -12,6 +12,7 @@ from agenttrace_sandbox.data_builders import (
     build_unit_completion_tasks,
     bug_fix_quality,
     discover_test_function_refs,
+    enrich_repair_cards,
     is_bug_fix_record,
     linked_issue_number,
     load_dataset_rows,
@@ -30,6 +31,37 @@ class BadJsonModel:
         if "Create a concise plan" in user:
             return "try something"
         return "not json"
+
+
+class RepairCardModel:
+    def __init__(self, invalid_id: bool = False) -> None:
+        self.invalid_id = invalid_id
+
+    def complete(self, system: str, user: str) -> str:
+        evidence_id = "EX" if self.invalid_id else "E2"
+        return json.dumps(
+            {
+                "root_cause": {
+                    "text": "The parser raises ValueError for empty input instead of returning an empty result.",
+                    "evidence_ids": ["E1", evidence_id],
+                },
+                "failure_condition": {
+                    "text": "Calling parse with an empty string triggers the bug.",
+                    "evidence_ids": ["E1"],
+                },
+                "expected_behavior": {
+                    "text": "Empty input should return None.",
+                    "evidence_ids": ["E3"],
+                },
+                "repair_rationale": {
+                    "text": "Returning None avoids raising ValueError for the covered empty-input case.",
+                    "evidence_ids": ["E2"],
+                },
+                "edge_cases": [
+                    {"text": "Empty string input is the regression case.", "evidence_ids": ["E3"]},
+                ],
+            }
+        )
 
 
 class RunnerTests(unittest.TestCase):
@@ -523,6 +555,68 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("test_diff", evidence_types)
             self.assertIn("E", row["repair_card"]["patch_intent"]["evidence_ids"][0])
             self.assertEqual(row["derived_tasks"]["localize_files"]["output"], ["src/parser.py"])
+
+    def test_enrich_repair_cards(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "cards.jsonl"
+            source.write_text(
+                json.dumps(
+                    {
+                        "id": "owner/repo#7",
+                        "repo": "owner/repo",
+                        "evidence": [
+                            {"id": "E1", "type": "issue_text", "text": "Parser crashes on empty input."},
+                            {"id": "E2", "type": "source_diff", "file": "src/parser.py", "text": "-raise ValueError\n+return None"},
+                            {"id": "E3", "type": "test_diff", "file": "tests/test_parser.py", "text": "assert parse('') is None"},
+                        ],
+                        "repair_card": {
+                            "symptom": {"text": "Parser crashes on empty input.", "evidence_ids": ["E1"]},
+                            "localization": {"source_files": ["src/parser.py"], "test_files": ["tests/test_parser.py"], "evidence_ids": ["E2", "E3"]},
+                        },
+                        "quality": {"overall": 0.9},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output = root / "enriched.jsonl"
+            summary = enrich_repair_cards(source, output, RepairCardModel())
+            row = json.loads(output.read_text(encoding="utf-8"))
+
+            self.assertEqual(summary.count, 1)
+            self.assertIn("root_cause", row["llm_repair_card"])
+            self.assertTrue(row["llm_quality"]["valid_json"])
+            self.assertTrue(row["llm_quality"]["all_evidence_ids_valid"])
+            self.assertTrue(row["llm_quality"]["grounding_ok"])
+            self.assertGreater(row["llm_quality"]["field_coverage"], 0.9)
+
+    def test_enrich_repair_cards_flags_invalid_evidence(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "cards.jsonl"
+            source.write_text(
+                json.dumps(
+                    {
+                        "id": "owner/repo#7",
+                        "evidence": [{"id": "E1", "type": "issue_text", "text": "Parser crashes."}],
+                        "repair_card": {},
+                        "quality": {},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output = root / "enriched.jsonl"
+            enrich_repair_cards(source, output, RepairCardModel(invalid_id=True))
+            row = json.loads(output.read_text(encoding="utf-8"))
+
+            self.assertFalse(row["llm_quality"]["all_evidence_ids_valid"])
+            self.assertIn("EX", row["llm_quality"]["invalid_evidence_ids"])
 
     def test_linked_issue_number(self) -> None:
         self.assertEqual(linked_issue_number("Fixed #37102"), 37102)

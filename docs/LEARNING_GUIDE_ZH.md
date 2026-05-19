@@ -383,6 +383,21 @@ Repair Card 是轻量 wiki 的结构化升级版。每条记录会包含：
 
 这个 JSONL 更适合作为中间数据资产：先保留结构化证据和质量分，再按需要导出 midtrain 文本、instruction SFT 或 agent task prompt。
 
+可选：用 OpenAI-compatible 模型增强语义字段：
+
+```bash
+export OPENAI_API_KEY="your_key"
+export OPENAI_BASE_URL="https://api.deepseek.com/v1"
+export OPENAI_MODEL="deepseek-chat"
+
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli enrich-repair-cards \
+  --input data/wiki/django_repair_cards.jsonl \
+  --output data/wiki/django_enriched_repair_cards.jsonl \
+  --limit 20
+```
+
+增强后会新增 `llm_repair_card`，包含 `root_cause`、`failure_condition`、`expected_behavior`、`repair_rationale`、`edge_cases`。每个非空字段都必须引用已有 `evidence_ids`。同时会新增 `llm_quality`，记录 JSON 是否有效、引用的证据 ID 是否存在、grounding 校验是否通过。API key 只通过环境变量读取，不要写进代码或提交。
+
 ## 5. 接真实 API 怎么理解
 
 真实 API 模式下，模型不再用固定的 mock 逻辑，而是真的生成工具调用。

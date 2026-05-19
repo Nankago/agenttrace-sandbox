@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agenttrace_sandbox.llm import extract_json_object
 from agenttrace_sandbox.tracing import read_jsonl
 from agenttrace_sandbox.sandbox import pythonpath_env
 
@@ -122,6 +123,12 @@ MODELSCOPE_MBPP_DATASET = "OmniData/MBPP"
 MODELSCOPE_HUMANEVAL_DATASET = "openai-mirror/openai_humaneval"
 DATASET_SOURCES = {"auto", "modelscope", "huggingface", "offline"}
 GITHUB_API = "https://api.github.com"
+REPAIR_CARD_ENRICH_SYSTEM = """You enrich evidence-grounded software repair cards.
+Return raw JSON only. Do not use markdown or prose.
+Every non-empty field must include evidence_ids copied from the provided evidence list.
+If evidence is insufficient, set text to "insufficient_evidence" and evidence_ids to [].
+Do not invent files, APIs, errors, tests, or root causes that are not supported by evidence.
+"""
 BUG_FIX_POSITIVE_KEYWORDS = [
     "fix",
     "fixed",
@@ -1041,6 +1048,34 @@ def build_repair_cards(input_path: Path, output_path: Path, min_quality: float =
     return BuildSummary(count=count, output_path=output_path)
 
 
+def enrich_repair_cards(input_path: Path, output_path: Path, model: Any, limit: int | None = None) -> BuildSummary:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with output_path.open("w", encoding="utf-8") as out:
+        for card in read_jsonl(input_path):
+            if limit is not None and count >= limit:
+                break
+            enriched = dict(card)
+            try:
+                response = model.complete(REPAIR_CARD_ENRICH_SYSTEM, repair_card_enrich_prompt(card))
+                llm_card = normalize_llm_repair_card(extract_json_object(response))
+                quality = llm_repair_card_quality(llm_card, card)
+                enriched["llm_repair_card"] = llm_card
+                enriched["llm_quality"] = quality
+            except Exception as exc:  # noqa: BLE001
+                enriched["llm_repair_card"] = {}
+                enriched["llm_quality"] = {
+                    "valid_json": False,
+                    "all_evidence_ids_valid": False,
+                    "field_coverage": 0.0,
+                    "grounding_ok": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            out.write(json.dumps(enriched, ensure_ascii=False) + "\n")
+            count += 1
+    return BuildSummary(count=count, output_path=output_path)
+
+
 def github_api_json(path: str, params: dict[str, str] | None = None) -> Any:
     text = github_api_text(path, params=params, accept="application/vnd.github+json")
     if not text:
@@ -1330,6 +1365,117 @@ def repair_card_quality(
         "patch_size_score": patch_size_score,
         "overall": overall,
     }
+
+
+LLM_REPAIR_CARD_FIELDS = [
+    "root_cause",
+    "failure_condition",
+    "expected_behavior",
+    "repair_rationale",
+    "edge_cases",
+]
+
+
+def repair_card_enrich_prompt(card: dict[str, Any]) -> str:
+    payload = {
+        "id": card.get("id", ""),
+        "repo": card.get("repo", ""),
+        "evidence": card.get("evidence", []),
+        "repair_card": card.get("repair_card", {}),
+        "quality": card.get("quality", {}),
+    }
+    return (
+        "Enrich this repair card with semantic repair understanding.\n"
+        "Output exactly this JSON shape:\n"
+        "{\n"
+        '  "root_cause": {"text": "...", "evidence_ids": ["E1"]},\n'
+        '  "failure_condition": {"text": "...", "evidence_ids": ["E1"]},\n'
+        '  "expected_behavior": {"text": "...", "evidence_ids": ["E2"]},\n'
+        '  "repair_rationale": {"text": "...", "evidence_ids": ["E3"]},\n'
+        '  "edge_cases": [{"text": "...", "evidence_ids": ["E4"]}]\n'
+        "}\n"
+        "Rules:\n"
+        "- Use only the evidence text and existing repair_card fields.\n"
+        "- Each claim must cite evidence_ids from the evidence list.\n"
+        "- If a field is not supported, use text='insufficient_evidence' and evidence_ids=[].\n"
+        "- edge_cases must be a list; use [] if no edge cases are supported.\n\n"
+        f"Repair card JSON:\n{json.dumps(payload, ensure_ascii=False)}"
+    )
+
+
+def normalize_llm_repair_card(raw: dict[str, Any]) -> dict[str, Any]:
+    normalized: dict[str, Any] = {}
+    for field in LLM_REPAIR_CARD_FIELDS:
+        value = raw.get(field)
+        if field == "edge_cases":
+            normalized[field] = normalize_llm_edge_cases(value)
+        else:
+            normalized[field] = normalize_grounded_claim(value)
+    return normalized
+
+
+def normalize_grounded_claim(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        return {"text": "insufficient_evidence", "evidence_ids": []}
+    text = compact_text(value.get("text", ""))
+    ids = value.get("evidence_ids", [])
+    if not isinstance(ids, list):
+        ids = []
+    return {
+        "text": text or "insufficient_evidence",
+        "evidence_ids": [str(item) for item in ids if str(item)],
+    }
+
+
+def normalize_llm_edge_cases(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    cases: list[dict[str, Any]] = []
+    for item in value:
+        claim = normalize_grounded_claim(item)
+        if claim["text"] != "insufficient_evidence" or claim["evidence_ids"]:
+            cases.append(claim)
+    return cases
+
+
+def llm_repair_card_quality(llm_card: dict[str, Any], source_card: dict[str, Any]) -> dict[str, Any]:
+    valid_ids = {str(item.get("id")) for item in source_card.get("evidence", []) if item.get("id")}
+    claims = llm_repair_card_claims(llm_card)
+    supported_claims = [claim for claim in claims if claim["text"] != "insufficient_evidence"]
+    invalid_ids = sorted({evidence_id for claim in claims for evidence_id in claim["evidence_ids"] if evidence_id not in valid_ids})
+    grounded_claims = [claim for claim in supported_claims if claim["evidence_ids"] and all(evidence_id in valid_ids for evidence_id in claim["evidence_ids"])]
+    expected_fields = len(LLM_REPAIR_CARD_FIELDS)
+    covered_fields = 0
+    for field in LLM_REPAIR_CARD_FIELDS:
+        value = llm_card.get(field)
+        if field == "edge_cases":
+            if isinstance(value, list) and value:
+                covered_fields += 1
+        elif isinstance(value, dict) and value.get("text") != "insufficient_evidence":
+            covered_fields += 1
+    field_coverage = round(covered_fields / expected_fields, 3)
+    grounding_ok = bool(supported_claims) and not invalid_ids and len(grounded_claims) == len(supported_claims)
+    return {
+        "valid_json": True,
+        "all_evidence_ids_valid": not invalid_ids,
+        "invalid_evidence_ids": invalid_ids,
+        "field_coverage": field_coverage,
+        "grounded_claims": len(grounded_claims),
+        "total_claims": len(supported_claims),
+        "grounding_ok": grounding_ok,
+    }
+
+
+def llm_repair_card_claims(llm_card: dict[str, Any]) -> list[dict[str, Any]]:
+    claims: list[dict[str, Any]] = []
+    for field in LLM_REPAIR_CARD_FIELDS:
+        value = llm_card.get(field)
+        if field == "edge_cases":
+            if isinstance(value, list):
+                claims.extend(value)
+        elif isinstance(value, dict):
+            claims.append(value)
+    return claims
 
 
 def patch_size_quality(source_count: int, test_count: int) -> float:

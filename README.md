@@ -317,6 +317,21 @@ Repair cards are a structured, grounded upgrade over the lightweight wiki format
 
 This format is meant as an intermediate data asset: keep the structured JSONL for analysis, then derive mid-training text, instruction SFT, or agent task prompts from it.
 
+Optionally enrich repair cards with an OpenAI-compatible model:
+
+```bash
+export OPENAI_API_KEY=sk-...
+export OPENAI_BASE_URL=https://api.deepseek.com/v1
+export OPENAI_MODEL=deepseek-chat
+
+python -m agenttrace_sandbox.cli enrich-repair-cards \
+  --input data/wiki/django_repair_cards.jsonl \
+  --output data/wiki/django_enriched_repair_cards.jsonl \
+  --limit 20
+```
+
+The enrichment step adds `llm_repair_card` fields such as `root_cause`, `failure_condition`, `expected_behavior`, `repair_rationale`, and `edge_cases`. Each field must cite existing evidence IDs, and `llm_quality` records whether the JSON was valid, evidence IDs were valid, and grounding checks passed. API keys are read only from environment variables and should never be committed.
+
 Run tests inside Docker instead of the host Python environment:
 
 ```bash

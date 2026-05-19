@@ -11,6 +11,7 @@ from agenttrace_sandbox.data_builders import (
     build_pr_wiki,
     build_repair_cards,
     build_unit_completion_tasks,
+    enrich_repair_cards,
     fetch_github_prs,
 )
 from agenttrace_sandbox.llm import MockCodingModel, OpenAICompatibleChat
@@ -122,6 +123,12 @@ def main() -> None:
     cards_parser.add_argument("--output", default=Path("data/wiki/repair_cards.jsonl"), type=Path)
     cards_parser.add_argument("--min-quality", type=float, default=0.0)
 
+    enrich_cards_parser = sub.add_parser("enrich-repair-cards", help="Use an OpenAI-compatible model to enrich repair cards with grounded semantic fields.")
+    enrich_cards_parser.add_argument("--input", required=True, type=Path)
+    enrich_cards_parser.add_argument("--output", default=Path("data/wiki/enriched_repair_cards.jsonl"), type=Path)
+    enrich_cards_parser.add_argument("--limit", type=int)
+    enrich_cards_parser.add_argument("--mock", action="store_true", help="Use deterministic local model instead of an API.")
+
     github_parser = sub.add_parser("fetch-github-prs", help="Fetch GitHub PR/Issue/diff records into local JSONL.")
     github_parser.add_argument("--repo", required=True, help="Repository in owner/name form.")
     github_parser.add_argument("--output", default=Path("data/github/pr_issue_pairs.jsonl"), type=Path)
@@ -209,6 +216,10 @@ def main() -> None:
         print(build_pr_wiki(args.input, args.output).render())
     elif args.command == "build-repair-cards":
         print(build_repair_cards(args.input, args.output, min_quality=args.min_quality).render())
+    elif args.command == "enrich-repair-cards":
+        config = config_from_args(args)
+        model = model_from_args(args, config)
+        print(enrich_repair_cards(args.input, args.output, model, limit=args.limit).render())
     elif args.command == "fetch-github-prs":
         print(
             fetch_github_prs(
