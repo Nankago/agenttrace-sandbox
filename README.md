@@ -299,6 +299,24 @@ python -m agenttrace_sandbox.cli build-pr-wiki \
 
 When present, `bug_fix_score` and `bug_fix_reasons` are copied into wiki metadata/source context for later analysis.
 
+Build evidence-grounded repair cards from the same PR JSONL:
+
+```bash
+python -m agenttrace_sandbox.cli build-repair-cards \
+  --input data/github/django_bugfix_prs.jsonl \
+  --output data/wiki/django_repair_cards.jsonl \
+  --min-quality 0.6
+```
+
+Repair cards are a structured, grounded upgrade over the lightweight wiki format. Each row contains:
+
+- `evidence`: numbered snippets such as `issue_text`, `pr_text`, `source_diff`, and `test_diff`.
+- `repair_card`: grounded fields for `symptom`, `localization`, `patch_intent`, `test_oracle`, and `validation`.
+- `quality`: automatic signals such as `has_test_evidence`, `evidence_coverage`, `grounding_score`, and `overall`.
+- `derived_tasks`: starter targets for localization, bug explanation, repair instruction, and test-spec SFT samples.
+
+This format is meant as an intermediate data asset: keep the structured JSONL for analysis, then derive mid-training text, instruction SFT, or agent task prompts from it.
+
 Run tests inside Docker instead of the host Python environment:
 
 ```bash

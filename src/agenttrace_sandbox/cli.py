@@ -9,6 +9,7 @@ from agenttrace_sandbox.data_builders import (
     build_humaneval_tasks,
     build_mbpp_tasks,
     build_pr_wiki,
+    build_repair_cards,
     build_unit_completion_tasks,
     fetch_github_prs,
 )
@@ -116,6 +117,11 @@ def main() -> None:
     wiki_parser.add_argument("--input", required=True, type=Path)
     wiki_parser.add_argument("--output", default=Path("data/wiki/repair_wiki.jsonl"), type=Path)
 
+    cards_parser = sub.add_parser("build-repair-cards", help="Build evidence-grounded repair cards from PR/Issue JSONL.")
+    cards_parser.add_argument("--input", required=True, type=Path)
+    cards_parser.add_argument("--output", default=Path("data/wiki/repair_cards.jsonl"), type=Path)
+    cards_parser.add_argument("--min-quality", type=float, default=0.0)
+
     github_parser = sub.add_parser("fetch-github-prs", help="Fetch GitHub PR/Issue/diff records into local JSONL.")
     github_parser.add_argument("--repo", required=True, help="Repository in owner/name form.")
     github_parser.add_argument("--output", default=Path("data/github/pr_issue_pairs.jsonl"), type=Path)
@@ -201,6 +207,8 @@ def main() -> None:
         )
     elif args.command == "build-pr-wiki":
         print(build_pr_wiki(args.input, args.output).render())
+    elif args.command == "build-repair-cards":
+        print(build_repair_cards(args.input, args.output, min_quality=args.min_quality).render())
     elif args.command == "fetch-github-prs":
         print(
             fetch_github_prs(

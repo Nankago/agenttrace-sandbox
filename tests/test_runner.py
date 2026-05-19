@@ -8,6 +8,7 @@ from agenttrace_sandbox.data_builders import (
     build_humaneval_tasks,
     build_mbpp_tasks,
     build_pr_wiki,
+    build_repair_cards,
     build_unit_completion_tasks,
     bug_fix_quality,
     discover_test_function_refs,
@@ -469,6 +470,59 @@ class RunnerTests(unittest.TestCase):
             self.assertIn("bug_summary", row["wiki"])
             self.assertEqual(row["metadata"]["bug_fix_score"], 3)
             self.assertIn("bug_fix_reasons", row["wiki"]["source_context"])
+
+    def test_build_repair_cards(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "prs.jsonl"
+            source.write_text(
+                json.dumps(
+                    {
+                        "id": "owner/repo#7",
+                        "repo": "owner/repo",
+                        "pr_number": 7,
+                        "pr_title": "Fix parser ValueError",
+                        "pr_body": "Adds a regression test for empty input.",
+                        "issue_number": 3,
+                        "issue_title": "Parser crashes",
+                        "issue_body": "Empty input raises ValueError.",
+                        "bug_fix_score": 4,
+                        "bug_fix_reasons": ["positive text keywords: Fix, ValueError", "touches tests with source"],
+                        "diff": (
+                            "diff --git a/src/parser.py b/src/parser.py\n"
+                            "--- a/src/parser.py\n"
+                            "+++ b/src/parser.py\n"
+                            "@@\n"
+                            "-raise ValueError\n"
+                            "+return None\n"
+                            "diff --git a/tests/test_parser.py b/tests/test_parser.py\n"
+                            "--- a/tests/test_parser.py\n"
+                            "+++ b/tests/test_parser.py\n"
+                            "@@\n"
+                            "+def test_empty_input():\n"
+                            "+    assert parse('') is None\n"
+                        ),
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            output = root / "cards.jsonl"
+            summary = build_repair_cards(source, output)
+            row = json.loads(output.read_text(encoding="utf-8"))
+
+            self.assertEqual(summary.count, 1)
+            self.assertEqual(row["source_files"], ["src/parser.py"])
+            self.assertEqual(row["test_files"], ["tests/test_parser.py"])
+            self.assertTrue(row["quality"]["has_test_evidence"])
+            self.assertGreater(row["quality"]["overall"], 0.7)
+            evidence_types = {item["type"] for item in row["evidence"]}
+            self.assertIn("source_diff", evidence_types)
+            self.assertIn("test_diff", evidence_types)
+            self.assertIn("E", row["repair_card"]["patch_intent"]["evidence_ids"][0])
+            self.assertEqual(row["derived_tasks"]["localize_files"]["output"], ["src/parser.py"])
 
     def test_linked_issue_number(self) -> None:
         self.assertEqual(linked_issue_number("Fixed #37102"), 37102)

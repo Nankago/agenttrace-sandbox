@@ -1028,6 +1028,19 @@ def build_pr_wiki(input_path: Path, output_path: Path) -> BuildSummary:
     return BuildSummary(count=count, output_path=output_path)
 
 
+def build_repair_cards(input_path: Path, output_path: Path, min_quality: float = 0.0) -> BuildSummary:
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    count = 0
+    with output_path.open("w", encoding="utf-8") as out:
+        for record in read_jsonl(input_path):
+            card = make_repair_card(record)
+            if float(card["quality"]["overall"]) < min_quality:
+                continue
+            out.write(json.dumps(card, ensure_ascii=False) + "\n")
+            count += 1
+    return BuildSummary(count=count, output_path=output_path)
+
+
 def github_api_json(path: str, params: dict[str, str] | None = None) -> Any:
     text = github_api_text(path, params=params, accept="application/vnd.github+json")
     if not text:
@@ -1168,6 +1181,193 @@ def is_docs_or_config_file(path: str) -> bool:
     if lowered.endswith((".md", ".rst", ".txt", ".adoc")):
         return True
     return lowered.endswith((".yml", ".yaml")) and ("workflow" in lowered or "ci" in lowered)
+
+
+def make_repair_card(record: dict[str, Any]) -> dict[str, Any]:
+    quality_fields = bug_fix_quality(record)
+    diff = str(record.get("diff", ""))
+    files = list(record.get("files") or files_from_diff(diff))
+    source_files = list(record.get("source_files") or quality_fields["source_files"])
+    test_files = list(record.get("test_files") or quality_fields["test_files"])
+    evidence = repair_evidence(record, diff)
+    evidence_by_type: dict[str, list[str]] = {}
+    for item in evidence:
+        evidence_by_type.setdefault(str(item["type"]), []).append(str(item["id"]))
+
+    text_ids = evidence_by_type.get("issue_text", []) + evidence_by_type.get("pr_text", [])
+    source_ids = evidence_by_type.get("source_diff", [])
+    test_ids = evidence_by_type.get("test_diff", [])
+    patch_ids = source_ids + evidence_by_type.get("other_diff", [])
+    symptom_title = str(record.get("issue_title") or record.get("pr_title") or record.get("id") or "unknown")
+    symptom_body = compact_text(record.get("issue_body") or record.get("pr_body") or "")
+    patch_summary = summarize_diff_for_files(diff, source_files) if source_files else summarize_diff(diff)
+    test_summary = summarize_diff_for_files(diff, test_files) if test_files else "No changed test evidence was found in the patch."
+    quality = repair_card_quality(record, quality_fields, evidence, source_files, test_files)
+    return {
+        "id": record.get("id") or safe_id(symptom_title),
+        "repo": record.get("repo", ""),
+        "source_record": {
+            "pr_number": record.get("pr_number"),
+            "pr_url": record.get("pr_url", ""),
+            "issue_number": record.get("issue_number"),
+        },
+        "files": files,
+        "source_files": source_files,
+        "test_files": test_files,
+        "evidence": evidence,
+        "repair_card": {
+            "symptom": {
+                "text": summarize_text(symptom_title, symptom_body),
+                "evidence_ids": text_ids,
+            },
+            "localization": {
+                "source_files": source_files,
+                "test_files": test_files,
+                "evidence_ids": source_ids + test_ids,
+            },
+            "patch_intent": {
+                "text": patch_summary,
+                "evidence_ids": patch_ids,
+            },
+            "test_oracle": {
+                "text": test_summary,
+                "evidence_ids": test_ids,
+            },
+            "validation": {
+                "text": "Use the changed tests when available; otherwise run the relevant project test command.",
+                "evidence_ids": test_ids,
+            },
+        },
+        "derived_tasks": {
+            "localize_files": {
+                "input": "Use the issue/PR evidence to identify files likely involved in the repair.",
+                "output": source_files,
+            },
+            "explain_bug": {
+                "input": "Use the evidence packet to explain the bug symptom and likely root cause.",
+                "output": summarize_text(symptom_title, symptom_body),
+            },
+            "repair_instruction": {
+                "input": "Use localization and test evidence to write a concise repair instruction.",
+                "output": f"Update {', '.join(source_files[:5]) or 'the affected source files'} so the behavior described by the issue is fixed and the relevant tests pass.",
+            },
+            "test_spec": {
+                "input": "Use changed test evidence to describe the expected behavior.",
+                "output": test_summary,
+            },
+        },
+        "quality": quality,
+    }
+
+
+def repair_evidence(record: dict[str, Any], diff: str) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+
+    def add(source_type: str, text: str, file: str = "", anchor: str = "") -> None:
+        compact = compact_text(text)
+        if not compact:
+            return
+        item: dict[str, Any] = {
+            "id": f"E{len(evidence) + 1}",
+            "type": source_type,
+            "text": compact[:1600],
+        }
+        if file:
+            item["file"] = file
+        if anchor:
+            item["anchor"] = anchor
+        evidence.append(item)
+
+    issue_text = "\n".join(str(record.get(key) or "") for key in ("issue_title", "issue_body"))
+    pr_text = "\n".join(str(record.get(key) or "") for key in ("pr_title", "pr_body"))
+    add("issue_text", issue_text, anchor=f"issue#{record.get('issue_number')}" if record.get("issue_number") else "")
+    add("pr_text", pr_text, anchor=f"pr#{record.get('pr_number')}" if record.get("pr_number") else "")
+
+    for path, patch in diff_file_patches(diff).items():
+        if is_test_file(path):
+            add("test_diff", patch, file=path)
+        elif is_source_file(path):
+            add("source_diff", patch, file=path)
+        elif patch.strip():
+            add("other_diff", patch, file=path)
+    return evidence
+
+
+def repair_card_quality(
+    record: dict[str, Any],
+    quality_fields: dict[str, Any],
+    evidence: list[dict[str, Any]],
+    source_files: list[str],
+    test_files: list[str],
+) -> dict[str, Any]:
+    has_issue = bool(record.get("issue_title") or record.get("issue_body") or record.get("issue_number"))
+    has_pr_text = bool(record.get("pr_title") or record.get("pr_body"))
+    has_source_patch = bool(source_files)
+    has_test_evidence = bool(test_files)
+    bug_score = float(record.get("bug_fix_score", quality_fields["bug_fix_score"]))
+    evidence_types = {str(item.get("type", "")) for item in evidence}
+    evidence_coverage = sum(
+        [
+            1 if has_issue else 0,
+            1 if has_pr_text else 0,
+            1 if has_source_patch else 0,
+            1 if has_test_evidence else 0,
+        ]
+    ) / 4
+    patch_size_score = patch_size_quality(len(source_files), len(test_files))
+    grounding_score = len(evidence_types & {"issue_text", "pr_text", "source_diff", "test_diff"}) / 4
+    bug_score_norm = max(0.0, min(1.0, bug_score / 5))
+    overall = round((evidence_coverage * 0.35) + (grounding_score * 0.25) + (patch_size_score * 0.2) + (bug_score_norm * 0.2), 3)
+    return {
+        "has_issue": has_issue,
+        "has_pr_text": has_pr_text,
+        "has_source_patch": has_source_patch,
+        "has_test_evidence": has_test_evidence,
+        "bug_fix_score": bug_score,
+        "bug_fix_reasons": record.get("bug_fix_reasons", quality_fields["bug_fix_reasons"]),
+        "evidence_coverage": round(evidence_coverage, 3),
+        "grounding_score": round(grounding_score, 3),
+        "patch_size_score": patch_size_score,
+        "overall": overall,
+    }
+
+
+def patch_size_quality(source_count: int, test_count: int) -> float:
+    total = source_count + test_count
+    if total == 0:
+        return 0.0
+    if total <= 6:
+        return 1.0
+    if total <= 12:
+        return 0.7
+    return 0.4
+
+
+def diff_file_patches(diff: str) -> dict[str, str]:
+    patches: dict[str, list[str]] = {}
+    current = ""
+    for line in diff.splitlines():
+        match = re.match(r"^diff --git a/(.*?) b/(.*?)$", line)
+        if match:
+            current = match.group(2)
+            patches.setdefault(current, [line])
+            continue
+        if current:
+            patches[current].append(line)
+    return {path: "\n".join(lines) for path, lines in patches.items()}
+
+
+def summarize_diff_for_files(diff: str, selected_files: list[str]) -> str:
+    patches = diff_file_patches(diff)
+    selected = {path for path in selected_files}
+    lines: list[str] = []
+    for path, patch in patches.items():
+        if path not in selected:
+            continue
+        added = sum(1 for line in patch.splitlines() if line.startswith("+") and not line.startswith("+++"))
+        removed = sum(1 for line in patch.splitlines() if line.startswith("-") and not line.startswith("---"))
+        lines.append(f"{path}: added lines={added}, removed lines={removed}")
+    return "; ".join(lines) if lines else summarize_diff(diff)
 
 
 def make_pr_wiki(record: dict[str, Any]) -> dict[str, Any]:

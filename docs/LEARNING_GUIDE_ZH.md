@@ -363,6 +363,26 @@ PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-pr-wiki \
 
 如果输入里有 `bug_fix_score` / `bug_fix_reasons`，`build-pr-wiki` 会把它们放进 wiki 的 metadata/source_context，后面做分析或二次筛选更方便。
 
+生成更结构化的 Repair Card：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli build-repair-cards \
+  --input data/github/django_bugfix_prs.jsonl \
+  --output data/wiki/django_repair_cards.jsonl \
+  --min-quality 0.6
+```
+
+Repair Card 是轻量 wiki 的结构化升级版。每条记录会包含：
+
+| 字段 | 含义 |
+|---|---|
+| `evidence` | 带编号的证据片段，例如 `issue_text`、`pr_text`、`source_diff`、`test_diff` |
+| `repair_card` | 有证据绑定的 `symptom`、`localization`、`patch_intent`、`test_oracle`、`validation` |
+| `quality` | 自动质量分，包括 `has_test_evidence`、`evidence_coverage`、`grounding_score`、`overall` |
+| `derived_tasks` | 后续可派生 localization、bug explanation、repair instruction、test spec 等 SFT 样本 |
+
+这个 JSONL 更适合作为中间数据资产：先保留结构化证据和质量分，再按需要导出 midtrain 文本、instruction SFT 或 agent task prompt。
+
 ## 5. 接真实 API 怎么理解
 
 真实 API 模式下，模型不再用固定的 mock 逻辑，而是真的生成工具调用。
