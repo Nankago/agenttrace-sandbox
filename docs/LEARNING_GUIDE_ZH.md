@@ -443,7 +443,7 @@ PYTHONPATH=src python3 -m agenttrace_sandbox.cli export-repair-corpus \
 
 这个输出不是 instruction/input/output，而是连续文本 JSONL。每行包含 `id`、`repo`、`text` 和 `metadata`。`text` 会线性化 Repository、PR、Issue、Problem Summary、带 evidence id 的证据、源码文件、测试文件、Symptom、Root Cause、Failure Condition、Expected Behavior、Patch Intent / Repair Rationale、Test Oracle、Edge Cases 和质量信号。默认不会把巨大 diff 原样塞进文本，只保留摘要；可以用 `--max-evidence-chars` 控制证据长度，只有明确需要时才使用 `--include-raw-diff`。
 
-`export-repair-corpus` 和 `export-repair-sft` 默认会使用 `--boilerplate-policy light` 做轻量 PR 模板清理。它会删除 HTML 注释、Checklist、AI Assistance Disclosure 这类流程噪声，但保留 `Branch description`、复现步骤、expected behavior、validation 等真正承载修复语义的段落。如果要完全保留原文，用 `--boilerplate-policy keep`；如果要更激进清理，用 `--boilerplate-policy strict`。
+`export-repair-corpus` 和 `export-repair-sft` 默认会使用 `--boilerplate-policy light` 做轻量 PR 模板清理。它会删除 HTML 注释、Checklist、AI Assistance Disclosure 这类流程噪声，但保留 `Branch description`、复现步骤、expected behavior、validation 等真正承载修复语义的段落。如果要完全保留原文，用 `--boilerplate-policy keep`；如果要更激进清理，用 `--boilerplate-policy strict`；如果想在存在标题时只保留可识别的修复语义段，用 `--boilerplate-policy semantic`。
 
 导出 Repair SFT 时可以做 ablation：
 
