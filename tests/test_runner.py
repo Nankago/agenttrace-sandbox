@@ -22,7 +22,7 @@ from agenttrace_sandbox.llm import MockCodingModel
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
 from agenttrace_sandbox.sandbox import build_docker_command
-from agenttrace_sandbox.sft_export import export_repair_corpus, export_repair_sft, export_sft, make_repair_sft_sample, stats_repair_cards
+from agenttrace_sandbox.sft_export import clean_repair_text, export_repair_corpus, export_repair_sft, export_sft, make_repair_sft_sample, stats_repair_cards
 from agenttrace_sandbox.stats import compute_manifest_stats, compute_run_stats
 
 
@@ -764,6 +764,52 @@ class RunnerTests(unittest.TestCase):
 
             self.assertEqual(count, 1)
             self.assertEqual(rows[0]["id"], "owner/repo#9")
+
+    def test_clean_repair_text_removes_pr_template_noise(self) -> None:
+        text = (
+            "Fixed #37066 -- Ensure cleanup. "
+            "#### Branch description Fix delayed cleanup of async iterables. "
+            "#### AI Assistance Disclosure (REQUIRED) <!-- Please select exactly ONE. --> "
+            "- [x] No AI tools were used in preparing this PR. "
+            "#### Checklist - [x] This PR follows the contribution guidelines. "
+            "- [x] This PR targets the `main` branch."
+        )
+
+        cleaned = clean_repair_text(text, "light")
+
+        self.assertIn("Branch description Fix delayed cleanup of async iterables", cleaned)
+        self.assertNotIn("AI Assistance Disclosure", cleaned)
+        self.assertNotIn("Checklist", cleaned)
+        self.assertNotIn("contribution guidelines", cleaned)
+
+    def test_clean_repair_text_keep_preserves_template(self) -> None:
+        text = "#### AI Assistance Disclosure (REQUIRED) - [x] No AI tools were used."
+
+        self.assertEqual(clean_repair_text(text, "keep"), text)
+
+    def test_export_repair_corpus_cleans_boilerplate_by_default(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "enriched_cards.jsonl"
+            card = sample_enriched_repair_card()
+            card["evidence"][0]["text"] = (
+                "Fixed #1 -- Parser empty input. "
+                "#### Branch description Return None for empty parser input. "
+                "#### AI Assistance Disclosure (REQUIRED) <!-- choose one --> - [x] No AI tools were used. "
+                "#### Checklist - [x] This PR follows the contribution guidelines."
+            )
+            card["repair_card"]["symptom"]["text"] = card["evidence"][0]["text"]
+            source.write_text(json.dumps(card) + "\n", encoding="utf-8")
+            output = root / "corpus.jsonl"
+
+            export_repair_corpus(source, output, min_quality=0.7, require_grounding=True)
+            text = json.loads(output.read_text(encoding="utf-8").splitlines()[0])["text"]
+
+            self.assertIn("Return None for empty parser input", text)
+            self.assertNotIn("AI Assistance Disclosure", text)
+            self.assertNotIn("contribution guidelines", text)
 
     def test_export_repair_sft_no_llm_variant_uses_rule_card(self) -> None:
         import tempfile

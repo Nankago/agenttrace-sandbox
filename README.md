@@ -370,13 +370,16 @@ python -m agenttrace_sandbox.cli export-repair-corpus \
 
 Repair Corpus rows contain `id`, `repo`, a linearized `text` field, and metadata. The text keeps evidence IDs, changed files, symptom, root cause, failure condition, expected behavior, repair rationale, test oracle, edge cases, and quality signals. By default it summarizes diff evidence rather than copying full diffs; use `--max-evidence-chars` to cap snippets and `--include-raw-diff` only when you intentionally want raw diff text.
 
+Both `export-repair-corpus` and `export-repair-sft` apply lightweight PR boilerplate cleaning by default with `--boilerplate-policy light`. This removes HTML comments, checklist sections, and AI-assistance disclosure boilerplate while preserving repair-bearing sections such as `Branch description`, reproduction notes, expected behavior, and validation text. Use `--boilerplate-policy keep` for fully raw evidence text or `--boilerplate-policy strict` for a more aggressive export.
+
 For ablations, `export-repair-sft` supports:
 
 ```bash
 python -m agenttrace_sandbox.cli export-repair-sft \
   --input data/wiki/django_enriched_repair_cards.jsonl \
   --output data/sft/repair_sft_no_llm.jsonl \
-  --variant no-llm
+  --variant no-llm \
+  --boilerplate-policy light
 ```
 
 Variants:

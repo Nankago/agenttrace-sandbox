@@ -12,6 +12,7 @@ SYSTEM_PROMPT = "You are a coding agent. Return exactly one safe JSON tool call 
 SFT_INSTRUCTION = "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON."
 REPAIR_SFT_TASKS = {"localize_files", "explain_bug", "repair_rationale", "test_spec", "repair_instruction"}
 REPAIR_SFT_VARIANTS = {"full", "no-tests", "no-llm", "diff-only"}
+BOILERPLATE_POLICIES = {"keep", "light", "strict"}
 
 
 def export_sft(
@@ -40,14 +41,24 @@ def export_repair_sft(
     min_quality: float = 0.0,
     require_grounding: bool = False,
     variant: str = "full",
+    boilerplate_policy: str = "light",
 ) -> int:
     if variant not in REPAIR_SFT_VARIANTS:
         raise ValueError(f"unknown repair SFT variant: {variant}")
+    if boilerplate_policy not in BOILERPLATE_POLICIES:
+        raise ValueError(f"unknown boilerplate policy: {boilerplate_policy}")
     selected_tasks = tasks or sorted(REPAIR_SFT_TASKS)
     unknown = [task for task in selected_tasks if task not in REPAIR_SFT_TASKS]
     if unknown:
         raise ValueError(f"unknown repair SFT task(s): {', '.join(unknown)}")
-    samples = collect_repair_sft_samples(input_path, selected_tasks, min_quality=min_quality, require_grounding=require_grounding, variant=variant)
+    samples = collect_repair_sft_samples(
+        input_path,
+        selected_tasks,
+        min_quality=min_quality,
+        require_grounding=require_grounding,
+        variant=variant,
+        boilerplate_policy=boilerplate_policy,
+    )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_jsonl(samples, output_path)
     return len(samples)
@@ -61,15 +72,19 @@ def export_repair_corpus(
     output_format: str = "jsonl",
     max_evidence_chars: int = 1200,
     include_raw_diff: bool = False,
+    boilerplate_policy: str = "light",
 ) -> int:
     if output_format != "jsonl":
         raise ValueError(f"unsupported repair corpus format: {output_format}")
+    if boilerplate_policy not in BOILERPLATE_POLICIES:
+        raise ValueError(f"unknown boilerplate policy: {boilerplate_policy}")
     rows = collect_repair_corpus_records(
         input_path,
         min_quality=min_quality,
         require_grounding=require_grounding,
         max_evidence_chars=max_evidence_chars,
         include_raw_diff=include_raw_diff,
+        boilerplate_policy=boilerplate_policy,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     write_jsonl(rows, output_path)
@@ -82,6 +97,7 @@ def collect_repair_sft_samples(
     min_quality: float = 0.0,
     require_grounding: bool = False,
     variant: str = "full",
+    boilerplate_policy: str = "light",
 ) -> list[dict[str, Any]]:
     samples: list[dict[str, Any]] = []
     for card in read_jsonl(input_path):
@@ -89,15 +105,21 @@ def collect_repair_sft_samples(
         if quality < min_quality:
             continue
         for task in tasks:
-            sample = make_repair_sft_sample(card, task, require_grounding=require_grounding, variant=variant)
+            sample = make_repair_sft_sample(card, task, require_grounding=require_grounding, variant=variant, boilerplate_policy=boilerplate_policy)
             if sample:
                 samples.append(sample)
     return samples
 
 
-def make_repair_sft_sample(card: dict[str, Any], task: str, require_grounding: bool = False, variant: str = "full") -> dict[str, Any] | None:
+def make_repair_sft_sample(
+    card: dict[str, Any],
+    task: str,
+    require_grounding: bool = False,
+    variant: str = "full",
+    boilerplate_policy: str = "light",
+) -> dict[str, Any] | None:
     evidence = variant_evidence(card.get("evidence", []), variant)
-    evidence_text = format_repair_evidence(evidence)
+    evidence_text = format_repair_evidence(evidence, boilerplate_policy=boilerplate_policy)
     source_id = str(card.get("id", ""))
     repo = str(card.get("repo", ""))
     quality = float(card.get("quality", {}).get("overall", 0))
@@ -192,6 +214,7 @@ def collect_repair_corpus_records(
     require_grounding: bool = False,
     max_evidence_chars: int = 1200,
     include_raw_diff: bool = False,
+    boilerplate_policy: str = "light",
 ) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for card in read_jsonl(input_path):
@@ -202,17 +225,29 @@ def collect_repair_corpus_records(
             continue
         if require_grounding and not grounding_ok:
             continue
-        rows.append(make_repair_corpus_record(card, max_evidence_chars=max_evidence_chars, include_raw_diff=include_raw_diff))
+        rows.append(
+            make_repair_corpus_record(
+                card,
+                max_evidence_chars=max_evidence_chars,
+                include_raw_diff=include_raw_diff,
+                boilerplate_policy=boilerplate_policy,
+            )
+        )
     return rows
 
 
-def make_repair_corpus_record(card: dict[str, Any], max_evidence_chars: int = 1200, include_raw_diff: bool = False) -> dict[str, Any]:
+def make_repair_corpus_record(
+    card: dict[str, Any],
+    max_evidence_chars: int = 1200,
+    include_raw_diff: bool = False,
+    boilerplate_policy: str = "light",
+) -> dict[str, Any]:
     quality = card.get("quality", {}) if isinstance(card.get("quality"), dict) else {}
     llm_quality = card.get("llm_quality", {}) if isinstance(card.get("llm_quality"), dict) else {}
     return {
         "id": str(card.get("id", "")),
         "repo": str(card.get("repo", "")),
-        "text": repair_corpus_text(card, max_evidence_chars=max_evidence_chars, include_raw_diff=include_raw_diff),
+        "text": repair_corpus_text(card, max_evidence_chars=max_evidence_chars, include_raw_diff=include_raw_diff, boilerplate_policy=boilerplate_policy),
         "metadata": {
             "quality": quality.get("overall", 0),
             "bug_fix_score": quality.get("bug_fix_score", 0),
@@ -222,14 +257,19 @@ def make_repair_corpus_record(card: dict[str, Any], max_evidence_chars: int = 12
     }
 
 
-def repair_corpus_text(card: dict[str, Any], max_evidence_chars: int = 1200, include_raw_diff: bool = False) -> str:
+def repair_corpus_text(
+    card: dict[str, Any],
+    max_evidence_chars: int = 1200,
+    include_raw_diff: bool = False,
+    boilerplate_policy: str = "light",
+) -> str:
     repair_card = card.get("repair_card", {}) if isinstance(card.get("repair_card"), dict) else {}
     llm_card = card.get("llm_repair_card", {}) if isinstance(card.get("llm_repair_card"), dict) else {}
     source_record = card.get("source_record", {}) if isinstance(card.get("source_record"), dict) else {}
     quality = card.get("quality", {}) if isinstance(card.get("quality"), dict) else {}
     llm_quality = card.get("llm_quality", {}) if isinstance(card.get("llm_quality"), dict) else {}
 
-    symptom = repair_claim_text(repair_card, "symptom")
+    symptom = clean_repair_text(repair_claim_text(repair_card, "symptom"), boilerplate_policy)
     patch_intent = repair_claim_text(repair_card, "patch_intent")
     test_oracle = repair_claim_text(repair_card, "test_oracle")
     validation = repair_claim_text(repair_card, "validation")
@@ -244,7 +284,13 @@ def repair_corpus_text(card: dict[str, Any], max_evidence_chars: int = 1200, inc
         f"PR: {source_record.get('pr_number', '')} {source_record.get('pr_url', '')}".rstrip(),
         f"Issue: {source_record.get('issue_number', '')}".rstrip(),
         f"Problem Summary: {symptom}",
-        "Evidence:\n" + corpus_evidence_text(card.get("evidence", []), max_evidence_chars=max_evidence_chars, include_raw_diff=include_raw_diff),
+        "Evidence:\n"
+        + corpus_evidence_text(
+            card.get("evidence", []),
+            max_evidence_chars=max_evidence_chars,
+            include_raw_diff=include_raw_diff,
+            boilerplate_policy=boilerplate_policy,
+        ),
         "Changed source files: " + join_values(card.get("source_files", [])),
         "Changed test files: " + join_values(card.get("test_files", [])),
         f"Symptom: {symptom}",
@@ -269,7 +315,7 @@ def repair_corpus_text(card: dict[str, Any], max_evidence_chars: int = 1200, inc
     return redact_secrets("\n\n".join(part for part in parts if part.strip()))
 
 
-def corpus_evidence_text(evidence: Any, max_evidence_chars: int, include_raw_diff: bool) -> str:
+def corpus_evidence_text(evidence: Any, max_evidence_chars: int, include_raw_diff: bool, boilerplate_policy: str = "light") -> str:
     if not isinstance(evidence, list):
         return ""
     chunks: list[str] = []
@@ -280,7 +326,7 @@ def corpus_evidence_text(evidence: Any, max_evidence_chars: int, include_raw_dif
         if item.get("type") in {"source_diff", "test_diff", "other_diff"} and not include_raw_diff:
             text = summarize_evidence_diff(text)
         else:
-            text = text[:max_evidence_chars]
+            text = clean_repair_text(text, boilerplate_policy)[:max_evidence_chars]
         file = f" {item.get('file')}" if item.get("file") else ""
         chunks.append(f"- [{item.get('id')}: {item.get('type')}{file}] {text}")
     return "\n".join(chunks)
@@ -473,7 +519,7 @@ def history_item(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def format_repair_evidence(evidence: Any) -> str:
+def format_repair_evidence(evidence: Any, boilerplate_policy: str = "light") -> str:
     if not isinstance(evidence, list):
         return ""
     chunks: list[str] = []
@@ -483,7 +529,7 @@ def format_repair_evidence(evidence: Any) -> str:
         evidence_id = item.get("id", "")
         source_type = item.get("type", "")
         file = item.get("file", "")
-        text = item.get("text", "")
+        text = clean_repair_text(str(item.get("text", "")), boilerplate_policy)
         header = f"[{evidence_id}: {source_type}" + (f" {file}" if file else "") + "]"
         chunks.append(f"{header}\n{text}")
     return "\n\n".join(chunks)
@@ -609,6 +655,77 @@ def summarize_evidence_diff(diff: str) -> str:
             files.append(match.group(2))
     file_text = f"files={join_values(files)}; " if files else ""
     return f"{file_text}added lines={added}, removed lines={removed}"
+
+
+def clean_repair_text(text: str, policy: str = "light") -> str:
+    if policy == "keep" or not text:
+        return text
+    cleaned = remove_html_comments(text)
+    cleaned = remove_template_sections(cleaned, ["AI Assistance Disclosure", "Checklist", "Backport"], keep_semantic_tail=True)
+    cleaned = remove_checkbox_boilerplate(cleaned)
+    if policy == "strict":
+        cleaned = remove_template_sentences(cleaned)
+    return compact_spaces(cleaned)
+
+
+def remove_html_comments(text: str) -> str:
+    return re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
+
+
+def remove_template_sections(text: str, headings: list[str], keep_semantic_tail: bool = True) -> str:
+    semantic_next = (
+        r"(?:Trac ticket number|Branch description|Problem|Description|Reproduction|Steps to reproduce|"
+        r"Expected behavior|Actual behavior|Test plan|Tests|Validation|Summary)"
+    )
+    cleaned = text
+    for heading in headings:
+        pattern = rf"(?:^|\s)(?:#+\s*)?{re.escape(heading)}(?:\s*\([^)]*\))?.*?(?=(?:\s#+\s*{semantic_next}\b)|$)"
+        if keep_semantic_tail:
+            cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        else:
+            cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE | re.DOTALL)
+    return cleaned
+
+
+def remove_checkbox_boilerplate(text: str) -> str:
+    lines = []
+    noisy_fragments = [
+        "contribution guidelines",
+        "does not disclose a security vulnerability",
+        "targets the `main` branch",
+        "targets the main branch",
+        "commit message is written in past tense",
+        "please select exactly one",
+        "no ai tools were used",
+        "if ai tools were used",
+        "fully reviewed and verified their output",
+    ]
+    for line in text.splitlines():
+        lowered = line.lower()
+        if re.match(r"\s*[-*]\s*\[[ xX]\]", line) and any(fragment in lowered for fragment in noisy_fragments):
+            continue
+        lines.append(line)
+    cleaned = "\n".join(lines)
+    for fragment in noisy_fragments:
+        cleaned = re.sub(rf"[-*]?\s*\[[ xX]\]?\s*[^.]*{re.escape(fragment)}[^.]*\.?", " ", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def remove_template_sentences(text: str) -> str:
+    patterns = [
+        r"Backports will be evaluated and done by mergers[^.]*\.?",
+        r"see vulnerability reporting[^.]*\.?",
+        r"This PR follows the contribution guidelines[^.]*\.?",
+        r"This PR targets the `?main`? branch[^.]*\.?",
+    ]
+    cleaned = text
+    for pattern in patterns:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    return cleaned
+
+
+def compact_spaces(text: str) -> str:
+    return re.sub(r"\s+", " ", text).strip()
 
 
 def repair_card_paths(input_pattern: Path | str) -> list[Path]:

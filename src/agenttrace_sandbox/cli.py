@@ -88,6 +88,7 @@ def main() -> None:
     repair_sft_parser.add_argument("--min-quality", type=float, default=0.0)
     repair_sft_parser.add_argument("--require-grounding", action="store_true")
     repair_sft_parser.add_argument("--variant", choices=["full", "no-tests", "no-llm", "diff-only"], default="full")
+    repair_sft_parser.add_argument("--boilerplate-policy", choices=["keep", "light", "strict"], default="light")
 
     repair_corpus_parser = sub.add_parser("export-repair-corpus", help="Export repair cards as mid-training continuous text JSONL.")
     repair_corpus_parser.add_argument("--input", required=True, type=Path)
@@ -97,6 +98,7 @@ def main() -> None:
     repair_corpus_parser.add_argument("--format", choices=["jsonl"], default="jsonl")
     repair_corpus_parser.add_argument("--max-evidence-chars", type=int, default=1200)
     repair_corpus_parser.add_argument("--include-raw-diff", action="store_true")
+    repair_corpus_parser.add_argument("--boilerplate-policy", choices=["keep", "light", "strict"], default="light")
 
     repair_card_stats_parser = sub.add_parser("stats-repair-cards", help="Summarize repair card JSONL quality and grounding.")
     repair_card_stats_parser.add_argument("--input", required=True, type=Path)
@@ -195,7 +197,15 @@ def main() -> None:
         print(f"wrote {count} samples to {args.output}")
     elif args.command == "export-repair-sft":
         tasks = [task.strip() for task in args.tasks.split(",") if task.strip()]
-        count = export_repair_sft(args.input, args.output, tasks=tasks, min_quality=args.min_quality, require_grounding=args.require_grounding, variant=args.variant)
+        count = export_repair_sft(
+            args.input,
+            args.output,
+            tasks=tasks,
+            min_quality=args.min_quality,
+            require_grounding=args.require_grounding,
+            variant=args.variant,
+            boilerplate_policy=args.boilerplate_policy,
+        )
         print(f"wrote {count} samples to {args.output}")
     elif args.command == "export-repair-corpus":
         count = export_repair_corpus(
@@ -206,6 +216,7 @@ def main() -> None:
             output_format=args.format,
             max_evidence_chars=args.max_evidence_chars,
             include_raw_diff=args.include_raw_diff,
+            boilerplate_policy=args.boilerplate_policy,
         )
         print(f"wrote {count} records to {args.output}")
     elif args.command == "stats-repair-cards":
