@@ -17,7 +17,7 @@ from agenttrace_sandbox.data_builders import (
 from agenttrace_sandbox.llm import MockCodingModel, OpenAICompatibleChat
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
-from agenttrace_sandbox.sft_export import export_sft
+from agenttrace_sandbox.sft_export import export_repair_sft, export_sft
 from agenttrace_sandbox.stats import compute_manifest_stats, compute_run_stats
 
 
@@ -75,6 +75,17 @@ def main() -> None:
     export_parser.add_argument("--strict", action="store_true", help="Only export clean successful traces with passing tests.")
     export_parser.add_argument("--clean-steps", action="store_true", help="Export clean tool calls from successful traces, even if other steps were noisy.")
     export_parser.add_argument("--reject-test-edits", action="store_true", help="With --strict, reject traces that edit tests.")
+
+    repair_sft_parser = sub.add_parser("export-repair-sft", help="Export enriched repair cards into instruction SFT JSONL.")
+    repair_sft_parser.add_argument("--input", required=True, type=Path)
+    repair_sft_parser.add_argument("--output", default=Path("data/sft/repair_sft.jsonl"), type=Path)
+    repair_sft_parser.add_argument(
+        "--tasks",
+        default="localize_files,explain_bug,repair_rationale,test_spec,repair_instruction",
+        help="Comma-separated repair SFT task types.",
+    )
+    repair_sft_parser.add_argument("--min-quality", type=float, default=0.0)
+    repair_sft_parser.add_argument("--require-grounding", action="store_true")
 
     stats_parser = sub.add_parser("stats", help="Summarize run traces.")
     stats_parser.add_argument("--runs", default=Path("runs"), type=Path)
@@ -166,6 +177,10 @@ def main() -> None:
             clean_steps=args.clean_steps,
             reject_test_edits=args.reject_test_edits,
         )
+        print(f"wrote {count} samples to {args.output}")
+    elif args.command == "export-repair-sft":
+        tasks = [task.strip() for task in args.tasks.split(",") if task.strip()]
+        count = export_repair_sft(args.input, args.output, tasks=tasks, min_quality=args.min_quality, require_grounding=args.require_grounding)
         print(f"wrote {count} samples to {args.output}")
     elif args.command == "stats":
         if args.manifest_results:

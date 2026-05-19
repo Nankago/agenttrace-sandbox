@@ -8,6 +8,7 @@ from agenttrace_sandbox.tracing import read_jsonl
 
 SYSTEM_PROMPT = "You are a coding agent. Return exactly one safe JSON tool call for the next step."
 SFT_INSTRUCTION = "Given a coding task, plan, and previous tool history, choose the next safe tool call as JSON."
+REPAIR_SFT_TASKS = {"localize_files", "explain_bug", "repair_rationale", "test_spec", "repair_instruction"}
 
 
 def export_sft(
@@ -27,6 +28,128 @@ def export_sft(
     else:
         raise ValueError(f"unsupported output format: {output_format}")
     return len(samples)
+
+
+def export_repair_sft(
+    input_path: Path,
+    output_path: Path,
+    tasks: list[str] | None = None,
+    min_quality: float = 0.0,
+    require_grounding: bool = False,
+) -> int:
+    selected_tasks = tasks or sorted(REPAIR_SFT_TASKS)
+    unknown = [task for task in selected_tasks if task not in REPAIR_SFT_TASKS]
+    if unknown:
+        raise ValueError(f"unknown repair SFT task(s): {', '.join(unknown)}")
+    samples = collect_repair_sft_samples(input_path, selected_tasks, min_quality=min_quality, require_grounding=require_grounding)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl(samples, output_path)
+    return len(samples)
+
+
+def collect_repair_sft_samples(
+    input_path: Path,
+    tasks: list[str],
+    min_quality: float = 0.0,
+    require_grounding: bool = False,
+) -> list[dict[str, Any]]:
+    samples: list[dict[str, Any]] = []
+    for card in read_jsonl(input_path):
+        quality = float(card.get("quality", {}).get("overall", 0))
+        if quality < min_quality:
+            continue
+        for task in tasks:
+            sample = make_repair_sft_sample(card, task, require_grounding=require_grounding)
+            if sample:
+                samples.append(sample)
+    return samples
+
+
+def make_repair_sft_sample(card: dict[str, Any], task: str, require_grounding: bool = False) -> dict[str, Any] | None:
+    evidence = card.get("evidence", [])
+    evidence_text = format_repair_evidence(evidence)
+    source_id = str(card.get("id", ""))
+    repo = str(card.get("repo", ""))
+    quality = float(card.get("quality", {}).get("overall", 0))
+    llm_card = card.get("llm_repair_card", {}) if isinstance(card.get("llm_repair_card"), dict) else {}
+    repair_card = card.get("repair_card", {}) if isinstance(card.get("repair_card"), dict) else {}
+
+    if task == "localize_files":
+        localization = repair_card.get("localization", {}) if isinstance(repair_card.get("localization"), dict) else {}
+        output = {
+            "source_files": localization.get("source_files", card.get("source_files", [])),
+            "test_files": localization.get("test_files", card.get("test_files", [])),
+        }
+        evidence_ids = list(localization.get("evidence_ids", [])) if isinstance(localization.get("evidence_ids", []), list) else []
+        instruction = "Identify the source and test files involved in fixing the bug."
+    elif task == "explain_bug":
+        claims = [llm_card.get("failure_condition"), llm_card.get("root_cause"), llm_card.get("expected_behavior")]
+        output = "\n".join(format_claim(label, claim) for label, claim in zip(["Failure condition", "Root cause", "Expected behavior"], claims) if usable_claim(claim))
+        if not output:
+            symptom = repair_card.get("symptom", {}) if isinstance(repair_card.get("symptom"), dict) else {}
+            output = str(symptom.get("text", ""))
+            evidence_ids = list(symptom.get("evidence_ids", [])) if isinstance(symptom.get("evidence_ids", []), list) else []
+        else:
+            evidence_ids = claim_evidence_ids([claim for claim in claims if isinstance(claim, dict)])
+        instruction = "Explain the bug using only the provided evidence."
+    elif task == "repair_rationale":
+        claim = llm_card.get("repair_rationale")
+        if usable_claim(claim):
+            output = str(claim["text"])
+            evidence_ids = list(claim.get("evidence_ids", []))
+        else:
+            patch_intent = repair_card.get("patch_intent", {}) if isinstance(repair_card.get("patch_intent"), dict) else {}
+            output = str(patch_intent.get("text", ""))
+            evidence_ids = list(patch_intent.get("evidence_ids", [])) if isinstance(patch_intent.get("evidence_ids", []), list) else []
+        instruction = "Describe why the patch fixes the bug."
+    elif task == "test_spec":
+        expected = llm_card.get("expected_behavior")
+        edge_cases = llm_card.get("edge_cases", []) if isinstance(llm_card.get("edge_cases"), list) else []
+        parts = []
+        if usable_claim(expected):
+            parts.append(f"Expected behavior: {expected['text']}")
+        parts.extend(f"Edge case: {case['text']}" for case in edge_cases if usable_claim(case))
+        output = "\n".join(parts)
+        evidence_ids = claim_evidence_ids(([expected] if isinstance(expected, dict) else []) + [case for case in edge_cases if isinstance(case, dict)])
+        if not output:
+            test_oracle = repair_card.get("test_oracle", {}) if isinstance(repair_card.get("test_oracle"), dict) else {}
+            output = str(test_oracle.get("text", ""))
+            evidence_ids = list(test_oracle.get("evidence_ids", [])) if isinstance(test_oracle.get("evidence_ids", []), list) else []
+        instruction = "Summarize the expected behavior and edge cases from the test evidence."
+    elif task == "repair_instruction":
+        derived = card.get("derived_tasks", {}) if isinstance(card.get("derived_tasks"), dict) else {}
+        repair_instruction = derived.get("repair_instruction", {}) if isinstance(derived.get("repair_instruction"), dict) else {}
+        output = str(repair_instruction.get("output", ""))
+        localization = repair_card.get("localization", {}) if isinstance(repair_card.get("localization"), dict) else {}
+        evidence_ids = list(localization.get("evidence_ids", [])) if isinstance(localization.get("evidence_ids", []), list) else []
+        instruction = "Write a concise repair instruction for a coding agent."
+    else:
+        return None
+
+    if not output:
+        return None
+    valid_ids = {str(item.get("id")) for item in evidence if item.get("id")}
+    evidence_ids = [str(item) for item in evidence_ids if str(item)]
+    grounding_ok = bool(evidence_ids) and all(item in valid_ids for item in evidence_ids)
+    if require_grounding and not grounding_ok:
+        return None
+    return {
+        "instruction": instruction,
+        "input": {
+            "repo": repo,
+            "source_id": source_id,
+            "evidence": evidence_text,
+        },
+        "output": output,
+        "metadata": {
+            "task_type": task,
+            "source_id": source_id,
+            "repo": repo,
+            "quality": quality,
+            "evidence_ids": evidence_ids,
+            "grounding_ok": grounding_ok,
+        },
+    }
 
 
 def collect_sft_samples(trace_path: Path, strict: bool = False, clean_steps: bool = False, reject_test_edits: bool = False) -> list[dict[str, Any]]:
@@ -145,6 +268,45 @@ def history_item(payload: dict[str, Any]) -> dict[str, Any]:
         "error_type": result.get("error_type", ""),
         "format_violation": bool(payload.get("format_violation")),
     }
+
+
+def format_repair_evidence(evidence: Any) -> str:
+    if not isinstance(evidence, list):
+        return ""
+    chunks: list[str] = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        evidence_id = item.get("id", "")
+        source_type = item.get("type", "")
+        file = item.get("file", "")
+        text = item.get("text", "")
+        header = f"[{evidence_id}: {source_type}" + (f" {file}" if file else "") + "]"
+        chunks.append(f"{header}\n{text}")
+    return "\n\n".join(chunks)
+
+
+def usable_claim(value: Any) -> bool:
+    return isinstance(value, dict) and bool(value.get("text")) and value.get("text") != "insufficient_evidence"
+
+
+def format_claim(label: str, claim: Any) -> str:
+    if not usable_claim(claim):
+        return ""
+    return f"{label}: {claim['text']}"
+
+
+def claim_evidence_ids(claims: list[dict[str, Any]]) -> list[str]:
+    ids: list[str] = []
+    for claim in claims:
+        values = claim.get("evidence_ids", [])
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            evidence_id = str(value)
+            if evidence_id and evidence_id not in ids:
+                ids.append(evidence_id)
+    return ids
 
 
 def write_jsonl(samples: list[dict[str, Any]], output_path: Path) -> None:

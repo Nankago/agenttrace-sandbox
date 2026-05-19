@@ -398,6 +398,19 @@ PYTHONPATH=src python3 -m agenttrace_sandbox.cli enrich-repair-cards \
 
 增强后会新增 `llm_repair_card`，包含 `root_cause`、`failure_condition`、`expected_behavior`、`repair_rationale`、`edge_cases`。每个非空字段都必须引用已有 `evidence_ids`。同时会新增 `llm_quality`，记录 JSON 是否有效、引用的证据 ID 是否存在、grounding 校验是否通过。API key 只通过环境变量读取，不要写进代码或提交。
 
+把增强后的 Repair Card 导出成 instruction SFT：
+
+```bash
+PYTHONPATH=src python3 -m agenttrace_sandbox.cli export-repair-sft \
+  --input data/wiki/django_enriched_repair_cards.jsonl \
+  --output data/sft/repair_sft.jsonl \
+  --tasks localize_files,explain_bug,repair_rationale,test_spec,repair_instruction \
+  --min-quality 0.7 \
+  --require-grounding
+```
+
+每条 SFT 样本包含 `instruction`、`input`、`output`，metadata 里保留 `task_type`、`source_id`、`quality` 和引用的 evidence IDs。这一步就是从结构化 Repair Card 到可训练 SFT 数据的出口。
+
 ## 5. 接真实 API 怎么理解
 
 真实 API 模式下，模型不再用固定的 mock 逻辑，而是真的生成工具调用。

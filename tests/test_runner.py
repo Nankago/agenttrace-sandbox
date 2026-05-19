@@ -22,7 +22,7 @@ from agenttrace_sandbox.llm import MockCodingModel
 from agenttrace_sandbox.manifest import run_manifest
 from agenttrace_sandbox.runner import run_task
 from agenttrace_sandbox.sandbox import build_docker_command
-from agenttrace_sandbox.sft_export import export_sft
+from agenttrace_sandbox.sft_export import export_repair_sft, export_sft
 from agenttrace_sandbox.stats import compute_manifest_stats, compute_run_stats
 
 
@@ -62,6 +62,41 @@ class RepairCardModel:
                 ],
             }
         )
+
+
+def sample_enriched_repair_card() -> dict:
+    return {
+        "id": "owner/repo#7",
+        "repo": "owner/repo",
+        "source_files": ["src/parser.py"],
+        "test_files": ["tests/test_parser.py"],
+        "evidence": [
+            {"id": "E1", "type": "issue_text", "text": "Parser crashes on empty input."},
+            {"id": "E2", "type": "source_diff", "file": "src/parser.py", "text": "-raise ValueError\n+return None"},
+            {"id": "E3", "type": "test_diff", "file": "tests/test_parser.py", "text": "assert parse('') is None"},
+        ],
+        "repair_card": {
+            "symptom": {"text": "Parser crashes on empty input.", "evidence_ids": ["E1"]},
+            "localization": {"source_files": ["src/parser.py"], "test_files": ["tests/test_parser.py"], "evidence_ids": ["E2", "E3"]},
+            "patch_intent": {"text": "src/parser.py: added lines=1, removed lines=1", "evidence_ids": ["E2"]},
+            "test_oracle": {"text": "tests/test_parser.py: added lines=1, removed lines=0", "evidence_ids": ["E3"]},
+        },
+        "derived_tasks": {
+            "repair_instruction": {
+                "input": "Use localization and test evidence to write a concise repair instruction.",
+                "output": "Update src/parser.py so empty input returns None and the relevant tests pass.",
+            }
+        },
+        "quality": {"overall": 0.9},
+        "llm_repair_card": {
+            "root_cause": {"text": "The parser raises ValueError for empty input.", "evidence_ids": ["E1", "E2"]},
+            "failure_condition": {"text": "Calling parse with an empty string triggers the bug.", "evidence_ids": ["E1"]},
+            "expected_behavior": {"text": "Empty input should return None.", "evidence_ids": ["E3"]},
+            "repair_rationale": {"text": "Returning None avoids raising ValueError for the covered case.", "evidence_ids": ["E2", "E3"]},
+            "edge_cases": [{"text": "Empty string input is the regression case.", "evidence_ids": ["E3"]}],
+        },
+        "llm_quality": {"grounding_ok": True},
+    }
 
 
 class RunnerTests(unittest.TestCase):
@@ -617,6 +652,40 @@ class RunnerTests(unittest.TestCase):
 
             self.assertFalse(row["llm_quality"]["all_evidence_ids_valid"])
             self.assertIn("EX", row["llm_quality"]["invalid_evidence_ids"])
+
+    def test_export_repair_sft(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "enriched_cards.jsonl"
+            source.write_text(json.dumps(sample_enriched_repair_card()) + "\n", encoding="utf-8")
+            output = root / "repair_sft.jsonl"
+
+            count = export_repair_sft(source, output, min_quality=0.7, require_grounding=True)
+            rows = [json.loads(line) for line in output.read_text(encoding="utf-8").splitlines()]
+            task_types = {row["metadata"]["task_type"] for row in rows}
+
+            self.assertEqual(count, 5)
+            self.assertEqual(task_types, {"localize_files", "explain_bug", "repair_rationale", "test_spec", "repair_instruction"})
+            self.assertTrue(all(row["metadata"]["grounding_ok"] for row in rows))
+            self.assertIn("E1", rows[0]["input"]["evidence"])
+
+    def test_export_repair_sft_filters_by_quality(self) -> None:
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            source = root / "enriched_cards.jsonl"
+            card = sample_enriched_repair_card()
+            card["quality"]["overall"] = 0.2
+            source.write_text(json.dumps(card) + "\n", encoding="utf-8")
+            output = root / "repair_sft.jsonl"
+
+            count = export_repair_sft(source, output, min_quality=0.7)
+
+            self.assertEqual(count, 0)
+            self.assertEqual(output.read_text(encoding="utf-8"), "")
 
     def test_linked_issue_number(self) -> None:
         self.assertEqual(linked_issue_number("Fixed #37102"), 37102)

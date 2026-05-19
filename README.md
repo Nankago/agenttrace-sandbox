@@ -332,6 +332,19 @@ python -m agenttrace_sandbox.cli enrich-repair-cards \
 
 The enrichment step adds `llm_repair_card` fields such as `root_cause`, `failure_condition`, `expected_behavior`, `repair_rationale`, and `edge_cases`. Each field must cite existing evidence IDs, and `llm_quality` records whether the JSON was valid, evidence IDs were valid, and grounding checks passed. API keys are read only from environment variables and should never be committed.
 
+Export enriched cards into instruction SFT JSONL:
+
+```bash
+python -m agenttrace_sandbox.cli export-repair-sft \
+  --input data/wiki/django_enriched_repair_cards.jsonl \
+  --output data/sft/repair_sft.jsonl \
+  --tasks localize_files,explain_bug,repair_rationale,test_spec,repair_instruction \
+  --min-quality 0.7 \
+  --require-grounding
+```
+
+Each output sample contains `instruction`, `input`, `output`, and metadata with `task_type`, `source_id`, `quality`, and the evidence IDs used for grounding. This is the handoff point from structured repair cards to trainable SFT data.
+
 Run tests inside Docker instead of the host Python environment:
 
 ```bash
